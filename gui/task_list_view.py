@@ -1,0 +1,256 @@
+"""
+Screen 1: Task list with search, date filters, sortable table, context menu.
+"""
+
+import logging
+from datetime import datetime
+
+from PyQt6.QtCore import Qt, QSortFilterProxyModel, QDate
+from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QDateEdit, QTableView, QHeaderView,
+    QMenu, QAbstractItemView, QMessageBox,
+)
+
+from db import database as db
+
+logger = logging.getLogger(__name__)
+
+STATUS_LABELS = {
+    "pending":   "⏳ В очереди",
+    "running":   "🔄 В процессе",
+    "completed": "✅ Завершено",
+    "error":     "❌ Ошибка",
+}
+STATUS_COLORS = {
+    "pending":   "#888888",
+    "running":   "#ffa726",
+    "completed": "#00c853",
+    "error":     "#ff5252",
+}
+
+COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
+
+
+class TaskListView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._app = None   # set by app.py
+        self._build_ui()
+        self.refresh()
+
+    def set_app(self, app):
+        self._app = app
+
+    # ── UI construction ────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(16)
+
+        # Header
+        header = QHBoxLayout()
+        lbl = QLabel("🔗  Проверка обратных ссылок")
+        lbl.setObjectName("heading")
+        header.addWidget(lbl)
+        header.addStretch()
+        btn_create = QPushButton("+ Создать задание")
+        btn_create.setObjectName("btnCreate")
+        btn_create.clicked.connect(self._go_create)
+        header.addWidget(btn_create)
+        root.addLayout(header)
+
+        # Filters
+        filter_bar = QHBoxLayout()
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Поиск задания...")
+        self._search.textChanged.connect(self._apply_filter)
+        filter_bar.addWidget(self._search, 3)
+
+        self._date_from = QDateEdit()
+        self._date_from.setDisplayFormat("dd.MM.yyyy")
+        self._date_from.setCalendarPopup(True)
+        self._date_from.setSpecialValueText("Дата начала")
+        self._date_from.setDate(QDate(2000, 1, 1))
+        self._date_from.dateChanged.connect(self._apply_filter)
+        filter_bar.addWidget(QLabel("от"), 0)
+        filter_bar.addWidget(self._date_from, 1)
+
+        self._date_to = QDateEdit()
+        self._date_to.setDisplayFormat("dd.MM.yyyy")
+        self._date_to.setCalendarPopup(True)
+        self._date_to.setDate(QDate.currentDate())
+        self._date_to.dateChanged.connect(self._apply_filter)
+        filter_bar.addWidget(QLabel("до"), 0)
+        filter_bar.addWidget(self._date_to, 1)
+
+        root.addLayout(filter_bar)
+
+        # Table
+        self._model = QStandardItemModel(0, 6, self)
+        self._model.setHorizontalHeaderLabels(
+            ["СОЗДАНО", "НАЗВАНИЕ", "ДОНОРОВ", "БЕКЛИНКОВ", "СТАТУС", "ДЕЙСТВИЯ"]
+        )
+
+        self._proxy = QSortFilterProxyModel(self)
+        self._proxy.setSourceModel(self._model)
+        self._proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._proxy.setFilterKeyColumn(COL_NAME)
+
+        self._table = QTableView()
+        self._table.setModel(self._proxy)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.horizontalHeader().setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.setSortingEnabled(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.doubleClicked.connect(self._on_row_double_click)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_context_menu)
+        root.addWidget(self._table)
+
+    # ── Data ──────────────────────────────────────────────────────────────
+
+    def refresh(self):
+        self._model.removeRows(0, self._model.rowCount())
+        tasks = db.get_all_tasks()
+        for task in tasks:
+            donor_count = db.count_task_donors(task["id"])
+            backlink_count = db.count_task_backlinks(task["id"])
+            status = task["status"]
+            progress = task["progress"]
+
+            # Format created_at
+            try:
+                dt = datetime.fromisoformat(task["created_at"])
+                created_str = dt.strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                created_str = task["created_at"]
+
+            status_label = STATUS_LABELS.get(status, status)
+            if status == "running" and progress > 0:
+                status_label = f"🔄 В процессе ({progress}%)"
+
+            items = [
+                QStandardItem(created_str),
+                QStandardItem(task["name"]),
+                QStandardItem(str(donor_count)),
+                QStandardItem(str(backlink_count)),
+                QStandardItem(status_label),
+                QStandardItem("⋮"),
+            ]
+            # store task_id in first column
+            items[0].setData(task["id"], Qt.ItemDataRole.UserRole)
+            color = QColor(STATUS_COLORS.get(status, "#888888"))
+            items[COL_STATUS].setForeground(color)
+            items[5].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self._model.appendRow(items)
+
+    def update_task_row(self, task_id: int):
+        """Refresh a single row after worker emits progress."""
+        for row in range(self._model.rowCount()):
+            item = self._model.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == task_id:
+                task = db.get_task(task_id)
+                if not task:
+                    return
+                status = task["status"]
+                progress = task["progress"]
+                status_label = STATUS_LABELS.get(status, status)
+                if status == "running" and progress > 0:
+                    status_label = f"🔄 В процессе ({progress}%)"
+                self._model.item(row, COL_STATUS).setText(status_label)
+                self._model.item(row, COL_STATUS).setForeground(
+                    QColor(STATUS_COLORS.get(status, "#888888"))
+                )
+                bl = db.count_task_backlinks(task_id)
+                self._model.item(row, COL_BACKLINKS).setText(str(bl))
+                return
+
+    # ── Filtering ─────────────────────────────────────────────────────────
+
+    def _apply_filter(self):
+        text = self._search.text().lower()
+        date_from = self._date_from.date()
+        date_to = self._date_to.date()
+
+        for row in range(self._model.rowCount()):
+            # Text filter on name (col 1)
+            name_item = self._model.item(row, COL_NAME)
+            name_match = not text or (name_item and text in name_item.text().lower())
+
+            # Date filter on created_at (col 0)
+            date_item = self._model.item(row, COL_CREATED)
+            date_match = True
+            if date_item:
+                try:
+                    row_dt = datetime.strptime(date_item.text(), "%d.%m.%Y %H:%M")
+                    row_qdate = QDate(row_dt.year, row_dt.month, row_dt.day)
+                    date_match = date_from <= row_qdate <= date_to
+                except ValueError:
+                    date_match = True
+
+            proxy_row = self._proxy.mapFromSource(self._model.index(row, 0)).row()
+            if proxy_row >= 0:
+                self._table.setRowHidden(proxy_row, not (name_match and date_match))
+
+        # Also apply text filter to proxy model (keeps sorting working)
+        self._proxy.setFilterFixedString("")  # reset proxy; row hiding is manual above
+
+    # ── Navigation ────────────────────────────────────────────────────────
+
+    def _get_task_id_for_proxy_row(self, proxy_row: int) -> int | None:
+        source_row = self._proxy.mapToSource(self._proxy.index(proxy_row, 0)).row()
+        item = self._model.item(source_row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _on_row_double_click(self, index):
+        task_id = self._get_task_id_for_proxy_row(index.row())
+        if task_id and self._app:
+            self._app.show_report(task_id)
+
+    def _go_create(self):
+        if self._app:
+            self._app.show_create()
+
+    # ── Context menu ──────────────────────────────────────────────────────
+
+    def _show_context_menu(self, pos):
+        index = self._table.indexAt(pos)
+        if not index.isValid():
+            return
+        task_id = self._get_task_id_for_proxy_row(index.row())
+        if task_id is None:
+            return
+
+        menu = QMenu(self)
+        act_retry  = menu.addAction("Повторить проверку")
+        act_export = menu.addAction("Экспортировать в .xlsx")
+        menu.addSeparator()
+        act_delete = menu.addAction("Удалить задание")
+
+        action = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if action == act_retry and self._app:
+            self._app.retry_task(task_id)
+        elif action == act_export and self._app:
+            self._app.export_task(task_id)
+        elif action == act_delete and self._app:
+            self._confirm_delete(task_id)
+
+    def _confirm_delete(self, task_id: int) -> None:
+        task = db.get_task(task_id)
+        name = task["name"] if task else f"#{task_id}"
+        reply = QMessageBox.question(
+            self,
+            "Удалить задание",
+            f"Удалить задание «{name}»?\n\nВсе доноры и бэклинки будут удалены безвозвратно.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._app.delete_task(task_id)  # type: ignore[union-attr]
