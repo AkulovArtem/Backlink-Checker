@@ -211,7 +211,7 @@ class TaskListView(QWidget):
             # task_id stored on col-0 UserRole; progress on COL_STATUS UserRole
             items[0].setData(task["id"], Qt.ItemDataRole.UserRole)
             items[COL_STATUS].setData(
-                _PROGRESS_ROLE, progress if status == "running" else None
+                progress if status == "running" else None, _PROGRESS_ROLE
             )
             color = QColor(STATUS_COLORS.get(status, "#888888"))
             items[COL_STATUS].setForeground(color)
@@ -237,7 +237,7 @@ class TaskListView(QWidget):
                     QColor(STATUS_COLORS.get(status, "#888888"))
                 )
                 self._model.item(row, COL_STATUS).setData(
-                    _PROGRESS_ROLE, progress if status == "running" else None
+                    progress if status == "running" else None, _PROGRESS_ROLE
                 )
                 bl = db.count_task_backlinks(task_id)
                 self._model.item(row, COL_BACKLINKS).setText(str(bl))
