@@ -35,6 +35,7 @@ class TaskCreateView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._app = None
+        self._skip_confirmed = False
         self._build_ui()
 
     def set_app(self, app):
@@ -80,6 +81,7 @@ class TaskCreateView(QWidget):
             "https://example.com/products/item-123\nhttps://test-site.org/blog/article-title\n..."
         )
         self._donors_edit.setFixedHeight(140)
+        self._donors_edit.textChanged.connect(self._on_donors_changed)
         root.addWidget(self._donors_edit)
 
         hint1 = QLabel("Введите ссылки, разделяя их переносами строк  •  До 100 000 ссылок")
@@ -166,6 +168,13 @@ class TaskCreateView(QWidget):
         self._error_lbl.setVisible(False)
         root.addWidget(self._error_lbl)
 
+        # Skipped-URL warning label (shown when some URLs lack http/https)
+        self._warn_lbl = QLabel("")
+        self._warn_lbl.setStyleSheet("color: #ffa726;")
+        self._warn_lbl.setWordWrap(True)
+        self._warn_lbl.setVisible(False)
+        root.addWidget(self._warn_lbl)
+
         # Create button
         btn_create = QPushButton("Создать")
         btn_create.setObjectName("btnCreate")
@@ -188,6 +197,12 @@ class TaskCreateView(QWidget):
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
+    def _on_donors_changed(self):
+        """Reset skip-confirmation so the warning re-appears if the text changes."""
+        if self._skip_confirmed:
+            self._skip_confirmed = False
+            self._warn_lbl.setVisible(False)
+
     def _on_ua_changed(self):
         is_custom = self._ua_combo.currentData() == "custom"
         self._custom_ua_edit.setVisible(is_custom)
@@ -206,6 +221,7 @@ class TaskCreateView(QWidget):
 
     def _submit(self):
         self._error_lbl.setVisible(False)
+        self._warn_lbl.setVisible(False)
 
         name = self._name_edit.text().strip() or "Задание"
 
@@ -214,6 +230,7 @@ class TaskCreateView(QWidget):
             u.strip() for u in self._donors_edit.toPlainText().splitlines()
             if u.strip()
         ]
+        invalid_count = sum(1 for u in raw_donors if not URL_RE.match(u))
         valid_donors = list(dict.fromkeys(
             u for u in raw_donors if URL_RE.match(u)
         ))[:100_000]
@@ -242,6 +259,19 @@ class TaskCreateView(QWidget):
             self._error_lbl.setText("Введите строку User-Agent для режима «Custom».")
             self._error_lbl.setVisible(True)
             return
+
+        # Warn about skipped URLs; require a second click to confirm
+        if invalid_count > 0 and not self._skip_confirmed:
+            self._warn_lbl.setText(
+                f"⚠  {invalid_count} URL пропущено — нет схемы http:// или https://. "
+                f"Задание будет создано с {len(valid_donors)} донором(ами). "
+                "Нажмите «Создать» ещё раз для подтверждения."
+            )
+            self._warn_lbl.setVisible(True)
+            self._skip_confirmed = True
+            return
+
+        self._skip_confirmed = False
 
         threads = self._threads_spin.value()
         timeout = self._timeout_spin.value()
@@ -279,3 +309,5 @@ class TaskCreateView(QWidget):
         self._threads_spin.setValue(5)
         self._timeout_spin.setValue(30)
         self._error_lbl.setVisible(False)
+        self._warn_lbl.setVisible(False)
+        self._skip_confirmed = False

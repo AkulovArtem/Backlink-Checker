@@ -13,10 +13,11 @@ class BacklinkInfo:
 
 @dataclass
 class IndexabilityResult:
-    google: str   = "open"   # "open" | "closed"
-    yandex: str   = "open"
-    bing: str     = "open"
-    baidu: str    = "open"
+    # None = page was never successfully loaded; "open"/"closed" = actual result
+    google: Optional[str] = None
+    yandex: Optional[str] = None
+    bing: Optional[str]   = None
+    baidu: Optional[str]  = None
     meta_robots: str = ""
     x_robots_tag: str = ""
 

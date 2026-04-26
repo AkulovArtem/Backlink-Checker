@@ -4,9 +4,13 @@ Entry point for Backlink Checker desktop application.
 
 import sys
 import logging
+from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 from PyQt6.QtWidgets import QApplication
+
+# Log file sits next to the script/executable regardless of working directory
+_LOG_PATH = Path(__file__).parent / "backlink_checker.log"
 
 # Configure logging before importing anything else
 logging.basicConfig(
@@ -14,7 +18,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         RotatingFileHandler(
-            "backlink_checker.log",
+            _LOG_PATH,
             maxBytes=5 * 1024 * 1024,   # 5 MB per file
             backupCount=3,
             encoding="utf-8",

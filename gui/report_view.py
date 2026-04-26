@@ -118,10 +118,14 @@ class ReportView(QWidget):
             return
         while layout.count():
             child = layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-            elif child.layout():
-                ReportView._delete_layout(child.layout())
+            w = child.widget()
+            if w is not None:
+                w.deleteLater()
+            else:
+                sub = child.layout()
+                if sub is not None:
+                    ReportView._delete_layout(sub)
+            # QSpacerItem: Python GC handles cleanup when child goes out of scope
 
     def _clear(self):
         self._delete_layout(self._root)
@@ -154,7 +158,7 @@ class ReportView(QWidget):
         for _anchor, _bls in sorted(_anchor_groups.items(), key=lambda x: -len(x[1])):
             _df = sum(1 for b in _bls if b["rel_type"] == "dofollow")
             _domains = len({
-                urlparse(donor_map.get(b["donor_id"], "")).netloc.lower().lstrip("www.")
+                urlparse(donor_map.get(b["donor_id"], "")).netloc.lower().removeprefix("www.")
                 for b in _bls
                 if donor_map.get(b["donor_id"])
             })
@@ -301,10 +305,14 @@ class ReportView(QWidget):
 
         # Unique domains DF/NF
         df_domains = len({
-            bl["target_url"].split("/")[2] for bl in backlinks if bl["rel_type"] == "dofollow"
+            urlparse(bl["target_url"]).netloc.lower()
+            for bl in backlinks
+            if bl["rel_type"] == "dofollow" and bl["target_url"]
         })
         nf_domains = len({
-            bl["target_url"].split("/")[2] for bl in backlinks if bl["rel_type"] != "dofollow"
+            urlparse(bl["target_url"]).netloc.lower()
+            for bl in backlinks
+            if bl["rel_type"] != "dofollow" and bl["target_url"]
         })
         analytics_row.addWidget(_analytics_block(
             "ССЫЛАЮЩИЕСЯ ДОМЕНЫ: DF / NF", df_domains, nf_domains,
@@ -341,6 +349,9 @@ class ReportView(QWidget):
         # ── Data Tabs ─────────────────────────────────────────────────────
         self._data_tabs = QTabWidget()
         self._data_tabs.addTab(
+            self._build_domains_tab(backlinks, domains), "По доменам"
+        )
+        self._data_tabs.addTab(
             self._build_donors_tab(donors, backlinks), "Доноры"
         )
         self._data_tabs.addTab(
@@ -351,6 +362,96 @@ class ReportView(QWidget):
             self._build_anchors_tab(anchor_stats), "Топ анкоры"
         )
         self._root.addWidget(self._data_tabs)
+
+    # ── Domains tab ───────────────────────────────────────────────────────
+
+    def _build_domains_tab(self, backlinks: list, target_domains: list) -> QWidget:
+        """One row per target domain: found/not-found with backlink and donor counts."""
+
+        def _norm(d: str) -> str:
+            d = d.lower().strip()
+            if d.startswith("https://"):
+                d = d[8:]
+            elif d.startswith("http://"):
+                d = d[7:]
+            return d.removeprefix("www.").rstrip("/")
+
+        def _link_domain(url: str) -> str:
+            try:
+                return urlparse(url).netloc.lower().removeprefix("www.")
+            except Exception:
+                return ""
+
+        def _matches(link_domain: str, norm_target: str) -> bool:
+            return link_domain == norm_target or link_domain.endswith("." + norm_target)
+
+        rows_data = []
+        for orig in target_domains:
+            norm = _norm(orig)
+            matched = [
+                bl for bl in backlinks
+                if _matches(_link_domain(bl["target_url"] or ""), norm)
+            ]
+            donor_ids = {bl["donor_id"] for bl in matched}
+            df = sum(1 for bl in matched if bl["rel_type"] == "dofollow")
+            rows_data.append({
+                "domain":    orig,
+                "donors":    len(donor_ids),
+                "backlinks": len(matched),
+                "dofollow":  df,
+                "nofollow":  len(matched) - df,
+                "found":     len(matched) > 0,
+            })
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        table = QTableWidget(len(rows_data), 5)
+        table.setHorizontalHeaderLabels(
+            ["ЦЕЛЕВОЙ ДОМЕН", "ДОНОРОВ", "БЭКЛИНКОВ", "DOFOLLOW / NOFOLLOW", "СТАТУС"]
+        )
+        _hh = table.horizontalHeader()
+        if _hh:
+            _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            _hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            _hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        _vh = table.verticalHeader()
+        if _vh:
+            _vh.setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSortingEnabled(False)
+
+        for i, row in enumerate(rows_data):
+            table.setItem(i, 0, QTableWidgetItem(row["domain"]))
+
+            donors_item = QTableWidgetItem()
+            donors_item.setData(Qt.ItemDataRole.DisplayRole, row["donors"])
+            table.setItem(i, 1, donors_item)
+
+            bl_item = QTableWidgetItem()
+            bl_item.setData(Qt.ItemDataRole.DisplayRole, row["backlinks"])
+            table.setItem(i, 2, bl_item)
+
+            df_nf_item = QTableWidgetItem(f"{row['dofollow']} / {row['nofollow']}")
+            if row["backlinks"] > 0:
+                if row["nofollow"] == 0:
+                    df_nf_item.setForeground(QColor(REL_COLORS["dofollow"]))
+                elif row["dofollow"] == 0:
+                    df_nf_item.setForeground(QColor(REL_COLORS["nofollow"]))
+                else:
+                    df_nf_item.setForeground(QColor("#ffa726"))
+            table.setItem(i, 3, df_nf_item)
+
+            status_text = "✅ Найден" if row["found"] else "❌ Не найден"
+            status_item = QTableWidgetItem(status_text)
+            status_item.setForeground(QColor("#00c853" if row["found"] else "#ff5252"))
+            table.setItem(i, 4, status_item)
+
+        table.setSortingEnabled(True)
+        layout.addWidget(table)
+        return widget
 
     # ── Donors tab ────────────────────────────────────────────────────────
 
@@ -449,6 +550,8 @@ class ReportView(QWidget):
 
             if self._donor_filter_type != "all":
                 donor_bls = [b for b in donor_bls if b["rel_type"] == self._donor_filter_type]
+                if not donor_bls:
+                    continue
 
             row = self._donor_table.rowCount()
             self._donor_table.insertRow(row)
@@ -469,10 +572,18 @@ class ReportView(QWidget):
                 "google": "index_google", "yandex": "index_yandex",
                 "bing": "index_bing", "baidu": "index_baidu",
             }.get(self._current_se, "index_google")
-            idx_val = donor[_se_col] or "—"
-            idx_color = "#00c853" if idx_val == "open" else "#ff5252"
-            idx_item = QTableWidgetItem("Открыто" if idx_val == "open" else "Закрыто")
-            idx_item.setForeground(QColor(idx_color))
+            idx_val = donor[_se_col]  # None = not yet checked
+            if idx_val == "open":
+                idx_color = "#00c853"
+                idx_text = "Открыто"
+            elif idx_val == "closed":
+                idx_color = "#ff5252"
+                idx_text = "Закрыто"
+            else:
+                idx_color = "#888888"
+                idx_text = "—"
+            idx_item = QTableWidgetItem(idx_text)
+            idx_item.setForeground(QColor(idx_color))  # noqa: F821
             self._donor_table.setItem(row, 1, idx_item)
 
             # Column 2: backlinks found

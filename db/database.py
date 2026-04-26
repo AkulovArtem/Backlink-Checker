@@ -220,18 +220,6 @@ def get_donor_stats(task_id: int) -> dict:
 
 # ── Backlinks ──────────────────────────────────────────────────────────────
 
-def create_backlink(donor_id: int, task_id: int, target_url: str,
-                    anchor_text: str, anchor_type: str, rel_type: str,
-                    context_html: str) -> None:
-    with get_connection() as conn:
-        conn.execute(
-            """INSERT INTO backlinks
-               (donor_id, task_id, target_url, anchor_text, anchor_type, rel_type, context_html)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (donor_id, task_id, target_url, anchor_text, anchor_type, rel_type, context_html)
-        )
-
-
 def create_backlinks_bulk(donor_id: int, task_id: int, backlinks: list) -> None:
     """Insert all backlinks for one donor in a single transaction."""
     if not backlinks:

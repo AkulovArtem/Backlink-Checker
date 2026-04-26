@@ -33,6 +33,43 @@ STATUS_COLORS = {
 COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
 
 
+class _TaskFilterProxy(QSortFilterProxyModel):
+    """Proxy that filters tasks by name text and date range.
+    Uses filterAcceptsRow so filtering survives column sorting."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = ""
+        self._date_from = QDate(2000, 1, 1)
+        self._date_to = QDate.currentDate()
+
+    def set_filters(self, text: str, date_from: QDate, date_to: QDate) -> None:
+        self._text = text.lower()
+        self._date_from = date_from
+        self._date_to = date_to
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
+        model = self.sourceModel()
+
+        if self._text:
+            name_item = model.item(source_row, COL_NAME)
+            if not name_item or self._text not in name_item.text().lower():
+                return False
+
+        date_item = model.item(source_row, COL_CREATED)
+        if date_item:
+            try:
+                row_dt = datetime.strptime(date_item.text(), "%d.%m.%Y %H:%M")
+                row_qdate = QDate(row_dt.year, row_dt.month, row_dt.day)
+                if not (self._date_from <= row_qdate <= self._date_to):
+                    return False
+            except ValueError:
+                pass
+
+        return True
+
+
 class TaskListView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -94,10 +131,8 @@ class TaskListView(QWidget):
             ["СОЗДАНО", "НАЗВАНИЕ", "ДОНОРОВ", "БЕКЛИНКОВ", "СТАТУС", "ДЕЙСТВИЯ"]
         )
 
-        self._proxy = QSortFilterProxyModel(self)
+        self._proxy = _TaskFilterProxy(self)
         self._proxy.setSourceModel(self._model)
-        self._proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._proxy.setFilterKeyColumn(COL_NAME)
 
         self._table = QTableView()
         self._table.setModel(self._proxy)
@@ -175,32 +210,11 @@ class TaskListView(QWidget):
     # ── Filtering ─────────────────────────────────────────────────────────
 
     def _apply_filter(self):
-        text = self._search.text().lower()
-        date_from = self._date_from.date()
-        date_to = self._date_to.date()
-
-        for row in range(self._model.rowCount()):
-            # Text filter on name (col 1)
-            name_item = self._model.item(row, COL_NAME)
-            name_match = not text or (name_item and text in name_item.text().lower())
-
-            # Date filter on created_at (col 0)
-            date_item = self._model.item(row, COL_CREATED)
-            date_match = True
-            if date_item:
-                try:
-                    row_dt = datetime.strptime(date_item.text(), "%d.%m.%Y %H:%M")
-                    row_qdate = QDate(row_dt.year, row_dt.month, row_dt.day)
-                    date_match = date_from <= row_qdate <= date_to
-                except ValueError:
-                    date_match = True
-
-            proxy_row = self._proxy.mapFromSource(self._model.index(row, 0)).row()
-            if proxy_row >= 0:
-                self._table.setRowHidden(proxy_row, not (name_match and date_match))
-
-        # Also apply text filter to proxy model (keeps sorting working)
-        self._proxy.setFilterFixedString("")  # reset proxy; row hiding is manual above
+        self._proxy.set_filters(
+            self._search.text(),
+            self._date_from.date(),
+            self._date_to.date(),
+        )
 
     # ── Navigation ────────────────────────────────────────────────────────
 

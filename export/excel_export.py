@@ -5,6 +5,7 @@ Export task results to Excel (.xlsx) with 4 sheets.
 import json
 import logging
 from datetime import datetime
+from urllib.parse import urlparse
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -134,7 +135,8 @@ def _sheet_donors(wb, donors, backlinks):
     headers = [
         "URL донора", "HTTP статус", "Title", "Canonical",
         "Внутр. ссылок", "Внешн. ссылок",
-        "Индекс Google", "Индекс Yandex", "Найдено бэклинков"
+        "Индекс Google", "Индекс Yandex", "Индекс Bing", "Индекс Baidu",
+        "Найдено бэклинков"
     ]
     _write_headers(ws, headers)
 
@@ -153,6 +155,8 @@ def _sheet_donors(wb, donors, backlinks):
             donor["external_links"] or 0,
             donor["index_google"] or "—",
             donor["index_yandex"] or "—",
+            donor["index_bing"] or "—",
+            donor["index_baidu"] or "—",
             bl_counts.get(donor["id"], 0),
         ]
         _write_row(ws, row_idx, values)
@@ -183,6 +187,50 @@ def _sheet_backlinks(wb, backlinks, donor_map: dict):
             bl["rel_type"] or "",
             (bl["context_html"] or "")[:500],
         ])
+
+    _auto_width(ws)
+
+
+def _sheet_domains(wb, backlinks, target_domains):
+    """One row per target domain: found/not-found with backlink and donor counts."""
+    ws = wb.create_sheet("По доменам")
+    _write_headers(ws, [
+        "Целевой домен", "Доноров", "Бэклинков", "Dofollow", "Nofollow", "Статус"
+    ])
+
+    def _norm(d):
+        d = d.lower().strip()
+        if d.startswith("https://"):
+            d = d[8:]
+        elif d.startswith("http://"):
+            d = d[7:]
+        return d.removeprefix("www.").rstrip("/")
+
+    def _link_domain(url):
+        try:
+            return urlparse(url).netloc.lower().removeprefix("www.")
+        except Exception:
+            return ""
+
+    def _matches(link_domain, norm_target):
+        return link_domain == norm_target or link_domain.endswith("." + norm_target)
+
+    for row_idx, orig in enumerate(target_domains, 2):
+        norm = _norm(orig)
+        matched = [
+            bl for bl in backlinks
+            if _matches(_link_domain(bl["target_url"] or ""), norm)
+        ]
+        donors = len({bl["donor_id"] for bl in matched})
+        df = sum(1 for bl in matched if bl["rel_type"] == "dofollow")
+        nf = len(matched) - df
+        found = len(matched) > 0
+
+        _write_row(ws, row_idx, [orig, donors, len(matched), df, nf,
+                                  "Найден" if found else "Не найден"])
+        ws.cell(row=row_idx, column=6).fill = PatternFill(
+            "solid", fgColor=CLR_GREEN if found else CLR_RED
+        )
 
     _auto_width(ws)
 
@@ -221,6 +269,7 @@ def export_to_excel(task_id: int, output_path: str) -> None:
     wb.remove(wb.active)  # remove default sheet
 
     _sheet_summary(wb, task, target_domains, donors, backlinks)
+    _sheet_domains(wb, backlinks, target_domains)
     _sheet_donors(wb, donors, backlinks)
     _sheet_backlinks(wb, backlinks, donor_map)
     _sheet_anchors(wb, anchor_stats)

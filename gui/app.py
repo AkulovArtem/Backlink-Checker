@@ -8,7 +8,7 @@ import logging
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QStackedWidget, QFileDialog,
-    QHBoxLayout, QVBoxLayout, QPushButton, QApplication,
+    QHBoxLayout, QVBoxLayout, QPushButton, QApplication, QMessageBox,
 )
 
 from db import database as db
@@ -129,25 +129,30 @@ class MainApp(QMainWindow):
         worker.start()
         logger.info("Task %d started", task_id)
 
+    # ── Worker lifecycle helpers ──────────────────────────────────────────
+
+    def _stop_worker(self, worker: CheckWorker) -> None:
+        """Signal worker to stop and wait without freezing the GUI event loop."""
+        worker.stop()
+        step, limit, elapsed = 50, 5000, 0
+        while elapsed < limit:
+            if worker.wait(step):
+                return
+            QApplication.processEvents()
+            elapsed += step
+        worker.terminate()
+        worker.wait(1000)
+
     def retry_task(self, task_id: int):
         if task_id in self._workers:
-            w = self._workers.pop(task_id)
-            w.stop()
-            if not w.wait(5000):   # 5 s timeout; don't block GUI indefinitely
-                w.terminate()
-                w.wait(1000)
+            self._stop_worker(self._workers.pop(task_id))
         db.reset_task(task_id)
         self.start_task(task_id)
         self._list_view.refresh()
 
     def delete_task(self, task_id: int):
-        # Stop running worker first
         if task_id in self._workers:
-            w = self._workers.pop(task_id)
-            w.stop()
-            if not w.wait(5000):
-                w.terminate()
-                w.wait(1000)
+            self._stop_worker(self._workers.pop(task_id))
         db.delete_task(task_id)
         # If we're viewing this task's report — go back to list
         if (self._stack.currentIndex() == SCREEN_REPORT
@@ -169,6 +174,11 @@ class MainApp(QMainWindow):
             logger.info("Exported task %d to %s", task_id, path)
         except Exception as exc:
             logger.exception("Export error: %s", exc)
+            QMessageBox.critical(
+                self,
+                "Ошибка экспорта",
+                f"Не удалось сохранить файл:\n{exc}\n\nПодробности — в лог-файле.",
+            )
 
     # ── Worker callbacks ──────────────────────────────────────────────────
 
@@ -207,10 +217,18 @@ class MainApp(QMainWindow):
     # ── Graceful shutdown ─────────────────────────────────────────────────
 
     def closeEvent(self, event):
-        for worker in list(self._workers.values()):
-            worker.stop()
-        for worker in list(self._workers.values()):
-            if not worker.wait(5000):   # 5 s grace period
-                worker.terminate()
-                worker.wait(1000)
+        # Signal all workers to stop simultaneously, then wait for each
+        workers = list(self._workers.values())
+        for w in workers:
+            w.stop()
+        for w in workers:
+            step, elapsed = 50, 0
+            while elapsed < 5000:
+                if w.wait(step):
+                    break
+                QApplication.processEvents()
+                elapsed += step
+            else:
+                w.terminate()
+                w.wait(1000)
         event.accept()
