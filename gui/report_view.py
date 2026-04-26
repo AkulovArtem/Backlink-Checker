@@ -7,8 +7,8 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -574,7 +574,7 @@ class ReportView(QWidget):
                 idx_color = "#888888"
                 idx_text = "—"
             idx_item = QTableWidgetItem(idx_text)
-            idx_item.setForeground(QColor(idx_color))  # noqa: F821
+            idx_item.setForeground(QColor(idx_color))
             self._donor_table.setItem(row, 1, idx_item)
 
             # Column 2: backlinks found
@@ -672,19 +672,17 @@ class ReportView(QWidget):
             row = self._bl_table.rowCount()
             self._bl_table.insertRow(row)
 
-            # Col 0: donor URL (clickable)
-            donor_lbl = QLabel(f'<a href="{donor_url}">{donor_url}</a>')
-            donor_lbl.setOpenExternalLinks(True)
-            donor_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-            donor_lbl.setContentsMargins(4, 2, 4, 2)
-            self._bl_table.setCellWidget(row, 0, donor_lbl)
+            # Col 0: donor URL — plain item so sorting moves it with its row
+            donor_item = QTableWidgetItem(donor_url)
+            donor_item.setForeground(QColor("#42a5f5"))
+            donor_item.setToolTip(donor_url)
+            self._bl_table.setItem(row, 0, donor_item)
 
-            # Col 1: target URL (clickable)
-            target_lbl = QLabel(f'<a href="{target_url}">{target_url}</a>')
-            target_lbl.setOpenExternalLinks(True)
-            target_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-            target_lbl.setContentsMargins(4, 2, 4, 2)
-            self._bl_table.setCellWidget(row, 1, target_lbl)
+            # Col 1: target URL — same treatment
+            target_item = QTableWidgetItem(target_url)
+            target_item.setForeground(QColor("#42a5f5"))
+            target_item.setToolTip(target_url)
+            self._bl_table.setItem(row, 1, target_item)
 
             # Col 2: anchor text — context in tooltip; donor_url/target_url/context
             # stored in UserRole so context menu and double-click can retrieve them.
@@ -807,7 +805,17 @@ class ReportView(QWidget):
         if vp:
             menu.exec(vp.mapToGlobal(pos))
 
-    def _on_bl_double_click(self, row: int, _col: int) -> None:
+    def _on_bl_double_click(self, row: int, col: int) -> None:
+        if col == 0:
+            item = self._bl_table.item(row, 0)
+            if item and item.text():
+                QDesktopServices.openUrl(QUrl(item.text()))
+            return
+        if col == 1:
+            item = self._bl_table.item(row, 1)
+            if item and item.text():
+                QDesktopServices.openUrl(QUrl(item.text()))
+            return
         data = self._get_bl_row_data(row)
         if data and data["context_html"]:
             self._show_context_dialog(data["context_html"])

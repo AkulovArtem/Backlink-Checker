@@ -54,6 +54,7 @@ async def _check_one(
 ) -> DonorResult:
     result = DonorResult(donor_id=donor_id, url=url)
     response_headers: dict = {}
+    final_url: str = url
 
     try:
         response = await page.goto(
@@ -82,6 +83,7 @@ async def _check_one(
 
         await _scroll_for_lazy_content(page)
         html = await page.content()
+        final_url = page.url  # may differ from url after HTTP redirects
 
     except PWTimeout:
         result.status = "not_loaded"
@@ -105,7 +107,7 @@ async def _check_one(
 
     # ── Parse ──────────────────────────────────────────────────────────────
     try:
-        parsed = parse_page(html, url, config.target_domains)
+        parsed = parse_page(html, final_url, config.target_domains)
         result.title = parsed["title"]
         result.canonical_url = parsed["canonical_url"]
         result.internal_links = parsed["internal_links"]
