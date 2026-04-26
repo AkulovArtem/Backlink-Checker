@@ -126,12 +126,9 @@ def get_all_tasks_with_counts() -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute("""
             SELECT t.*,
-                   COUNT(DISTINCT d.id)  AS donor_count,
-                   COUNT(DISTINCT b.id)  AS backlink_count
+                   (SELECT COUNT(*) FROM donors    d WHERE d.task_id = t.id) AS donor_count,
+                   (SELECT COUNT(*) FROM backlinks b WHERE b.task_id = t.id) AS backlink_count
             FROM   tasks t
-            LEFT JOIN donors    d ON d.task_id = t.id
-            LEFT JOIN backlinks b ON b.task_id = t.id
-            GROUP BY t.id
             ORDER BY t.created_at DESC
         """).fetchall()
 
