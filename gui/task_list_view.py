@@ -51,6 +51,8 @@ class _TaskFilterProxy(QSortFilterProxyModel):
 
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
         model = self.sourceModel()
+        if not isinstance(model, QStandardItemModel):
+            return True
 
         if self._text:
             name_item = model.item(source_row, COL_NAME)
