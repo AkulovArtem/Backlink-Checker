@@ -17,6 +17,35 @@ from utils.user_agents import get_profile
 logger = logging.getLogger(__name__)
 
 
+_INFINITE_SCROLL_GROWTH = 1.30  # page grew >30 % → likely infinite pagination
+
+
+async def _scroll_for_lazy_content(page) -> None:
+    """Trigger lazy-loaded content by scrolling down.
+
+    Performs up to two scroll passes.  Aborts after the first pass if the page
+    height grows by more than 30 % — a reliable sign of infinite-scroll
+    pagination where further scrolling would keep adding new posts indefinitely.
+    """
+    try:
+        prev_h: int = await page.evaluate("document.body.scrollHeight")
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(0.8)
+
+        new_h: int = await page.evaluate("document.body.scrollHeight")
+        if new_h >= prev_h * _INFINITE_SCROLL_GROWTH:
+            # Infinite scroll detected — one pass is enough, stop here
+            return
+
+        # Second pass: stable page, trigger any remaining lazy observers
+        if new_h > prev_h:
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.5)
+
+    except Exception:
+        pass  # non-critical — JS errors on exotic pages must not break checking
+
+
 async def _check_one(
     page,
     donor_id: int,
@@ -29,7 +58,7 @@ async def _check_one(
     try:
         response = await page.goto(
             url,
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
             timeout=config.timeout * 1000,
         )
 
@@ -51,6 +80,7 @@ async def _check_one(
             result.error_code = f"HTTP_{result.http_status}"
             return result
 
+        await _scroll_for_lazy_content(page)
         html = await page.content()
 
     except PWTimeout:
@@ -158,6 +188,9 @@ async def run_check(
         except asyncio.CancelledError:
             for t in tasks:
                 t.cancel()
+            # Wait for tasks to finish before closing the browser;
+            # otherwise pages in flight get a PWError mid-navigation.
+            await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             await browser.close()
 

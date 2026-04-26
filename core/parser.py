@@ -3,6 +3,7 @@ Parse rendered HTML: extract title, canonical, all links, backlinks to target do
 """
 
 import re
+import html as _html_module
 import logging
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
@@ -14,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 def _get_domain(url: str) -> str:
     try:
-        return urlparse(url).netloc.lower().lstrip("www.")
+        netloc = urlparse(url).netloc.lower()
+        return netloc.removeprefix("www.")
     except Exception:
         return ""
 
@@ -23,12 +25,12 @@ def _normalize_target(domain: str) -> str:
     """Strip www., scheme, trailing slash from a target domain."""
     domain = domain.lower().strip()
     domain = re.sub(r"^https?://", "", domain)
-    domain = domain.lstrip("www.").rstrip("/")
+    domain = domain.removeprefix("www.").rstrip("/")
     return domain
 
 
 def _matches_target(href: str, targets: set[str]) -> bool:
-    link_domain = _get_domain(href).lstrip("www.")
+    link_domain = _get_domain(href)
     return any(link_domain == t or link_domain.endswith("." + t) for t in targets)
 
 
@@ -68,18 +70,45 @@ def _get_rel_type(tag, page_noindex: bool) -> str:
 def _extract_context(tag, raw_html: str, window: int = 200,
                      search_from: int = 0) -> tuple[str, int]:
     """
-    Extract ±window chars of raw HTML around the tag.
-    search_from — start position for the search (avoids re-matching earlier identical tags).
+    Extract ±window chars of raw HTML around the link tag.
+    Searches by href attribute value rather than BS4 tag serialization —
+    BS4/lxml may reorder attributes so str(tag) often mismatches the source.
     Returns (context_html, next_search_pos).
     """
-    tag_str = str(tag)
-    idx = raw_html.find(tag_str, search_from)
-    if idx == -1:                          # fallback: try from the beginning
-        idx = raw_html.find(tag_str)
+    href = str(tag.get("href", "")).strip()
+    idx = -1
+
+    if href:
+        escaped = _html_module.escape(href, quote=True)
+        # Try decoded href first; also try HTML-escaped form (e.g. & → &amp;)
+        variants = [href] if href == escaped else [href, escaped]
+
+        for val in variants:
+            for pattern in (f'href="{val}"', f"href='{val}'"):
+                pos = raw_html.find(pattern, search_from)
+                if pos != -1:
+                    idx = pos
+                    break
+            if idx != -1:
+                break
+
+        # Fallback: search from beginning (handles the case where search_from
+        # already passed this occurrence due to earlier identical hrefs)
+        if idx == -1:
+            for val in variants:
+                for pattern in (f'href="{val}"', f"href='{val}'"):
+                    pos = raw_html.find(pattern)
+                    if pos != -1:
+                        idx = pos
+                        break
+                if idx != -1:
+                    break
+
     if idx == -1:
-        return tag_str[:500], search_from
+        return str(tag)[:500], search_from
+
     start = max(0, idx - window)
-    end = min(len(raw_html), idx + len(tag_str) + window)
+    end = min(len(raw_html), idx + len(href) + window)
     return raw_html[start:end], idx + 1
 
 
