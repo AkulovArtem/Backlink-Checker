@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QDateEdit, QTableView, QHeaderView,
     QMenu, QAbstractItemView, QMessageBox,
+    QApplication, QStyle, QStyleOptionProgressBar, QStyledItemDelegate,
 )
 
 from db import database as db
@@ -31,6 +32,31 @@ STATUS_COLORS = {
 }
 
 COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
+
+# UserRole on the COL_STATUS item stores the integer progress (0-100) for
+# running tasks; None for all other statuses so the delegate falls through.
+_PROGRESS_ROLE = Qt.ItemDataRole.UserRole
+
+
+class _ProgressDelegate(QStyledItemDelegate):
+    """Renders a QProgressBar inside the STATUS cell for running tasks."""
+
+    def paint(self, painter, option, index):
+        progress = index.data(_PROGRESS_ROLE)
+        if isinstance(progress, int):
+            opt = QStyleOptionProgressBar()
+            opt.rect = option.rect.adjusted(2, 3, -2, -3)
+            opt.minimum = 0
+            opt.maximum = 100
+            opt.progress = progress
+            opt.text = f"🔄 {progress}%"
+            opt.textVisible = True
+            opt.textAlignment = Qt.AlignmentFlag.AlignCenter
+            QApplication.style().drawControl(
+                QStyle.ControlElement.CE_ProgressBar, opt, painter
+            )
+        else:
+            super().paint(painter, option, index)
 
 
 class _TaskFilterProxy(QSortFilterProxyModel):
@@ -148,16 +174,18 @@ class TaskListView(QWidget):
         self._table.doubleClicked.connect(self._on_row_double_click)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
+        self._progress_delegate = _ProgressDelegate(self._table)
+        self._table.setItemDelegateForColumn(COL_STATUS, self._progress_delegate)
         root.addWidget(self._table)
 
     # ── Data ──────────────────────────────────────────────────────────────
 
     def refresh(self):
         self._model.removeRows(0, self._model.rowCount())
-        tasks = db.get_all_tasks()
+        tasks = db.get_all_tasks_with_counts()   # single JOIN query — no N+1
         for task in tasks:
-            donor_count = db.count_task_donors(task["id"])
-            backlink_count = db.count_task_backlinks(task["id"])
+            donor_count = task["donor_count"]
+            backlink_count = task["backlink_count"]
             status = task["status"]
             progress = task["progress"]
 
@@ -180,8 +208,11 @@ class TaskListView(QWidget):
                 QStandardItem(status_label),
                 QStandardItem("⋮"),
             ]
-            # store task_id in first column
+            # task_id stored on col-0 UserRole; progress on COL_STATUS UserRole
             items[0].setData(task["id"], Qt.ItemDataRole.UserRole)
+            items[COL_STATUS].setData(
+                _PROGRESS_ROLE, progress if status == "running" else None
+            )
             color = QColor(STATUS_COLORS.get(status, "#888888"))
             items[COL_STATUS].setForeground(color)
             items[5].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -204,6 +235,9 @@ class TaskListView(QWidget):
                 self._model.item(row, COL_STATUS).setText(status_label)
                 self._model.item(row, COL_STATUS).setForeground(
                     QColor(STATUS_COLORS.get(status, "#888888"))
+                )
+                self._model.item(row, COL_STATUS).setData(
+                    _PROGRESS_ROLE, progress if status == "running" else None
                 )
                 bl = db.count_task_backlinks(task_id)
                 self._model.item(row, COL_BACKLINKS).setText(str(bl))
@@ -245,14 +279,20 @@ class TaskListView(QWidget):
             return
 
         menu = QMenu(self)
-        act_retry  = menu.addAction("Повторить проверку")
-        act_export = menu.addAction("Экспортировать в .xlsx")
+        act_retry        = menu.addAction("Повторить проверку")
+        act_retry_failed = menu.addAction("Повторить упавшие доноры")
+        act_clone        = menu.addAction("Дублировать задание")
+        act_export       = menu.addAction("Экспортировать в .xlsx")
         menu.addSeparator()
         act_delete = menu.addAction("Удалить задание")
 
         action = menu.exec(self._table.viewport().mapToGlobal(pos))
         if action == act_retry and self._app:
             self._app.retry_task(task_id)
+        elif action == act_retry_failed and self._app:
+            self._app.retry_failed_task(task_id)
+        elif action == act_clone and self._app:
+            self._app.clone_task(task_id)
         elif action == act_export and self._app:
             self._app.export_task(task_id)
         elif action == act_delete and self._app:

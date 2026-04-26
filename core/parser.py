@@ -5,32 +5,17 @@ Parse rendered HTML: extract title, canonical, all links, backlinks to target do
 import re
 import html as _html_module
 import logging
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from core.models import BacklinkInfo
+from utils.url_utils import get_domain, normalize_domain
 
 logger = logging.getLogger(__name__)
 
 
-def _get_domain(url: str) -> str:
-    try:
-        netloc = urlparse(url).netloc.lower()
-        return netloc.removeprefix("www.")
-    except Exception:
-        return ""
-
-
-def _normalize_target(domain: str) -> str:
-    """Strip www., scheme, trailing slash from a target domain."""
-    domain = domain.lower().strip()
-    domain = re.sub(r"^https?://", "", domain)
-    domain = domain.removeprefix("www.").rstrip("/")
-    return domain
-
-
 def _matches_target(href: str, targets: set[str]) -> bool:
-    link_domain = _get_domain(href)
+    link_domain = get_domain(href)
     return any(link_domain == t or link_domain.endswith("." + t) for t in targets)
 
 
@@ -119,8 +104,8 @@ def parse_page(html: str, page_url: str, target_domains: list[str]) -> dict:
       page_nofollow (bool), backlinks (list[BacklinkInfo])
     """
     soup = BeautifulSoup(html, "lxml")
-    targets = {_normalize_target(d) for d in target_domains}
-    page_host = _get_domain(page_url)
+    targets = {normalize_domain(d) for d in target_domains}
+    page_host = get_domain(page_url)
 
     # Title
     title_tag = soup.find("title")
@@ -152,7 +137,7 @@ def parse_page(html: str, page_url: str, target_domains: list[str]) -> dict:
 
         # Resolve relative URLs
         absolute_href = urljoin(page_url, href)
-        link_host = _get_domain(absolute_href)
+        link_host = get_domain(absolute_href)
 
         if link_host == page_host:
             internal_links += 1

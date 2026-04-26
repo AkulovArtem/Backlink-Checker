@@ -6,18 +6,25 @@ import json
 import logging
 from collections import defaultdict
 from datetime import datetime
-from urllib.parse import urlparse
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QTabWidget, QLineEdit, QProgressBar, QScrollArea, QMenu,
-    QAbstractItemView, QMessageBox,
+    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QApplication,
 )
 
 from db import database as db
+from utils.url_utils import get_domain, normalize_domain, matches_target
+
+
+def _clipboard_set(text: str) -> None:
+    """Copy text to system clipboard; guards against clipboard() returning None."""
+    cb = QApplication.clipboard()
+    if cb is not None:
+        cb.setText(text)
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +165,7 @@ class ReportView(QWidget):
         for _anchor, _bls in sorted(_anchor_groups.items(), key=lambda x: -len(x[1])):
             _df = sum(1 for b in _bls if b["rel_type"] == "dofollow")
             _domains = len({
-                urlparse(donor_map.get(b["donor_id"], "")).netloc.lower().removeprefix("www.")
+                get_domain(donor_map.get(b["donor_id"], ""))
                 for b in _bls
                 if donor_map.get(b["donor_id"])
             })
@@ -305,12 +312,12 @@ class ReportView(QWidget):
 
         # Unique domains DF/NF
         df_domains = len({
-            urlparse(bl["target_url"]).netloc.lower()
+            get_domain(bl["target_url"])
             for bl in backlinks
             if bl["rel_type"] == "dofollow" and bl["target_url"]
         })
         nf_domains = len({
-            urlparse(bl["target_url"]).netloc.lower()
+            get_domain(bl["target_url"])
             for bl in backlinks
             if bl["rel_type"] != "dofollow" and bl["target_url"]
         })
@@ -367,30 +374,12 @@ class ReportView(QWidget):
 
     def _build_domains_tab(self, backlinks: list, target_domains: list) -> QWidget:
         """One row per target domain: found/not-found with backlink and donor counts."""
-
-        def _norm(d: str) -> str:
-            d = d.lower().strip()
-            if d.startswith("https://"):
-                d = d[8:]
-            elif d.startswith("http://"):
-                d = d[7:]
-            return d.removeprefix("www.").rstrip("/")
-
-        def _link_domain(url: str) -> str:
-            try:
-                return urlparse(url).netloc.lower().removeprefix("www.")
-            except Exception:
-                return ""
-
-        def _matches(link_domain: str, norm_target: str) -> bool:
-            return link_domain == norm_target or link_domain.endswith("." + norm_target)
-
         rows_data = []
         for orig in target_domains:
-            norm = _norm(orig)
+            norm = normalize_domain(orig)
             matched = [
                 bl for bl in backlinks
-                if _matches(_link_domain(bl["target_url"] or ""), norm)
+                if matches_target(bl["target_url"] or "", norm)
             ]
             donor_ids = {bl["donor_id"] for bl in matched}
             df = sum(1 for bl in matched if bl["rel_type"] == "dofollow")
@@ -514,6 +503,8 @@ class ReportView(QWidget):
         _vh = self._donor_table.verticalHeader()
         if _vh:
             _vh.setVisible(False)
+        self._donor_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._donor_table.customContextMenuRequested.connect(self._show_donor_context_menu)
         layout.addWidget(self._donor_table)
 
         self._donors_cache = donors
@@ -598,8 +589,10 @@ class ReportView(QWidget):
             bl_item.setToolTip(bls_text)
             self._donor_table.setItem(row, 2, bl_item)
 
-            # Column 3-4: link counts
-            self._donor_table.setItem(row, 3, QTableWidgetItem(str(donor["internal_links"] or 0)))
+            # Column 3-4: link counts (donor URL stored in col-3 UserRole for context menu)
+            int_item = QTableWidgetItem(str(donor["internal_links"] or 0))
+            int_item.setData(Qt.ItemDataRole.UserRole, donor["url"])
+            self._donor_table.setItem(row, 3, int_item)
             self._donor_table.setItem(row, 4, QTableWidgetItem(str(donor["external_links"] or 0)))
 
             self._donor_table.setRowHeight(row, max(60, 24 * max(len(donor_bls), 1)))
@@ -647,6 +640,9 @@ class ReportView(QWidget):
         self._bl_table.setAlternatingRowColors(True)
         self._bl_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._bl_table.setSortingEnabled(True)
+        self._bl_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._bl_table.customContextMenuRequested.connect(self._show_bl_context_menu)
+        self._bl_table.cellDoubleClicked.connect(self._on_bl_double_click)
         layout.addWidget(self._bl_table)
 
         self._backlinks_cache = backlinks          # shared with donors tab
@@ -690,9 +686,15 @@ class ReportView(QWidget):
             target_lbl.setContentsMargins(4, 2, 4, 2)
             self._bl_table.setCellWidget(row, 1, target_lbl)
 
-            # Col 2: anchor text — context shown in tooltip
+            # Col 2: anchor text — context in tooltip; donor_url/target_url/context
+            # stored in UserRole so context menu and double-click can retrieve them.
             anchor_item = QTableWidgetItem(anchor or "—")
             anchor_item.setToolTip(bl["context_html"] or "")
+            anchor_item.setData(Qt.ItemDataRole.UserRole, {
+                "donor_url":    donor_url,
+                "target_url":   target_url,
+                "context_html": bl["context_html"] or "",
+            })
             self._bl_table.setItem(row, 2, anchor_item)
 
             # Col 3: anchor type
@@ -771,6 +773,84 @@ class ReportView(QWidget):
         layout.addWidget(table)
         return widget
 
+    # ── Backlinks context menu & HTML dialog ──────────────────────────────
+
+    def _get_bl_row_data(self, row: int) -> dict | None:
+        item = self._bl_table.item(row, 2)
+        if not item:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def _show_bl_context_menu(self, pos) -> None:
+        row = self._bl_table.rowAt(pos.y())
+        if row < 0:
+            return
+        data = self._get_bl_row_data(row)
+        if not data:
+            return
+
+        menu = QMenu(self)
+        menu.addAction(
+            "Копировать URL донора",
+            lambda: _clipboard_set(data["donor_url"]),
+        )
+        menu.addAction(
+            "Копировать URL цели",
+            lambda: _clipboard_set(data["target_url"]),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            "Просмотр HTML-контекста",
+            lambda: self._show_context_dialog(data["context_html"]),
+        )
+        vp = self._bl_table.viewport()
+        if vp:
+            menu.exec(vp.mapToGlobal(pos))
+
+    def _on_bl_double_click(self, row: int, _col: int) -> None:
+        data = self._get_bl_row_data(row)
+        if data and data["context_html"]:
+            self._show_context_dialog(data["context_html"])
+
+    def _show_context_dialog(self, context_html: str) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("HTML-контекст ссылки")
+        dialog.resize(860, 340)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        editor = QTextEdit()
+        editor.setReadOnly(True)
+        editor.setPlainText(context_html)
+        editor.setFont(QFont("Courier New", 10))
+        layout.addWidget(editor)
+
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        dialog.exec()
+
+    # ── Donors context menu ───────────────────────────────────────────────
+
+    def _show_donor_context_menu(self, pos) -> None:
+        row = self._donor_table.rowAt(pos.y())
+        if row < 0:
+            return
+        item = self._donor_table.item(row, 3)
+        url = item.data(Qt.ItemDataRole.UserRole) if item else ""
+        if not url:
+            return
+        menu = QMenu(self)
+        menu.addAction(
+            "Копировать URL донора",
+            lambda: _clipboard_set(url),
+        )
+        vp = self._donor_table.viewport()
+        if vp:
+            menu.exec(vp.mapToGlobal(pos))
+
     # ── SE switching ──────────────────────────────────────────────────────
 
     def _switch_se(self, key: str):
@@ -801,6 +881,10 @@ class ReportView(QWidget):
         menu = QMenu(self)
         menu.addAction("Повторить проверку",
                        lambda: self._app and self._app.retry_task(self._task_id))
+        menu.addAction("Повторить упавшие доноры",
+                       lambda: self._app and self._app.retry_failed_task(self._task_id))
+        menu.addAction("Дублировать задание",
+                       lambda: self._app and self._app.clone_task(self._task_id))
         menu.addAction("Экспортировать в .xlsx",
                        lambda: self._app and self._app.export_task(self._task_id))
         menu.addSeparator()
