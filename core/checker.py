@@ -42,7 +42,7 @@ async def _scroll_for_lazy_content(page) -> None:
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await asyncio.sleep(0.5)
 
-    except Exception:
+    except Exception:  # nosec B110
         pass  # non-critical — JS errors on exotic pages must not break checking
 
 

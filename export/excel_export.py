@@ -55,7 +55,7 @@ def _auto_width(ws, min_w=10, max_w=60):
             try:
                 if cell.value:
                     max_len = max(max_len, len(str(cell.value)))
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         ws.column_dimensions[col_letter].width = min(max(max_len + 2, min_w), max_w)
 

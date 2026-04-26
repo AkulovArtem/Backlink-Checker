@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m ruff check . --output-format=concise)",
+      "Bash(python -m mypy . --ignore-missing-imports --no-error-summary)",
+      "Bash(python -m bandit -r . -ll --exclude .git,.ruff_cache,.mypy_cache)",
+      "Bash(pip list *)",
+      "Bash(python -m bandit -r . -l --exclude .git,.ruff_cache,.mypy_cache)",
+      "Bash(pip install *)",
+      "Bash(bash *)"
+    ]
+  }
+}
