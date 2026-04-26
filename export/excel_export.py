@@ -5,13 +5,13 @@ Export task results to Excel (.xlsx) with 4 sheets.
 import json
 import logging
 from datetime import datetime
-from urllib.parse import urlparse
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 from db import database as db
+from utils.url_utils import normalize_domain, matches_target
 
 logger = logging.getLogger(__name__)
 
@@ -198,28 +198,11 @@ def _sheet_domains(wb, backlinks, target_domains):
         "Целевой домен", "Доноров", "Бэклинков", "Dofollow", "Nofollow", "Статус"
     ])
 
-    def _norm(d):
-        d = d.lower().strip()
-        if d.startswith("https://"):
-            d = d[8:]
-        elif d.startswith("http://"):
-            d = d[7:]
-        return d.removeprefix("www.").rstrip("/")
-
-    def _link_domain(url):
-        try:
-            return urlparse(url).netloc.lower().removeprefix("www.")
-        except Exception:
-            return ""
-
-    def _matches(link_domain, norm_target):
-        return link_domain == norm_target or link_domain.endswith("." + norm_target)
-
     for row_idx, orig in enumerate(target_domains, 2):
-        norm = _norm(orig)
+        norm = normalize_domain(orig)
         matched = [
             bl for bl in backlinks
-            if _matches(_link_domain(bl["target_url"] or ""), norm)
+            if matches_target(bl["target_url"] or "", norm)
         ]
         donors = len({bl["donor_id"] for bl in matched})
         df = sum(1 for bl in matched if bl["rel_type"] == "dofollow")

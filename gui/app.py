@@ -150,6 +150,56 @@ class MainApp(QMainWindow):
         self.start_task(task_id)
         self._list_view.refresh()
 
+    def retry_failed_task(self, task_id: int):
+        """Re-run only donors that previously failed to load (status = not_loaded)."""
+        if task_id in self._workers:
+            self._stop_worker(self._workers.pop(task_id))
+
+        task = db.get_task(task_id)
+        if not task:
+            return
+        failed = db.get_failed_donors_for_task(task_id)
+        if not failed:
+            logger.info("Task %d: no failed donors to retry", task_id)
+            return
+
+        db.reset_failed_donors(task_id)
+        target_domains = json.loads(task["target_domains"])
+        config = CheckConfig(
+            task_id=task_id,
+            donor_urls=[(int(d["id"]), str(d["url"])) for d in failed],
+            target_domains=target_domains,
+            user_agent_preset=task["user_agent"],
+            custom_user_agent=task["custom_user_agent"] or "",
+            threads=task["threads"],
+            timeout=task["timeout"],
+        )
+        worker = CheckWorker(config)
+        self._workers[task_id] = worker
+        worker.progress_updated.connect(
+            lambda done, total, tid=task_id: self._on_progress(tid, done, total)
+        )
+        worker.donor_done.connect(
+            lambda result, tid=task_id: self._list_view.update_task_row(tid)
+        )
+        worker.finished.connect(
+            lambda ok, tid=task_id: self._on_finished(tid, ok)
+        )
+        worker.start()
+        self._list_view.refresh()
+        logger.info("Task %d: retrying %d failed donor(s)", task_id, len(failed))
+
+    def clone_task(self, task_id: int):
+        """Open the Create-task form pre-filled with an existing task's data."""
+        task = db.get_task(task_id)
+        if not task:
+            return
+        donors = db.get_donors_for_task(task_id)
+        self._create_view.reset()
+        self._create_view.prefill(task, donors)
+        self._stack.setCurrentIndex(SCREEN_CREATE)
+        logger.info("Task %d cloned into create form", task_id)
+
     def delete_task(self, task_id: int):
         if task_id in self._workers:
             self._stop_worker(self._workers.pop(task_id))

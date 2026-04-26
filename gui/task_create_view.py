@@ -2,6 +2,7 @@
 Screen 2: Create task form.
 """
 
+import json
 import re
 import logging
 from pathlib import Path
@@ -311,3 +312,20 @@ class TaskCreateView(QWidget):
         self._error_lbl.setVisible(False)
         self._warn_lbl.setVisible(False)
         self._skip_confirmed = False
+
+    def prefill(self, task, donors: list) -> None:
+        """Pre-fill the form with data from an existing task for cloning."""
+        self._name_edit.setText(f"{task['name']} (копия)")
+        self._donors_edit.setPlainText("\n".join(d["url"] for d in donors))
+        targets = json.loads(task["target_domains"])
+        self._targets_edit.setPlainText("\n".join(targets))
+        ua = task["user_agent"] or "desktop_chrome"
+        for i in range(self._ua_combo.count()):
+            if self._ua_combo.itemData(i) == ua:
+                self._ua_combo.setCurrentIndex(i)
+                break
+        custom = task["custom_user_agent"] or ""
+        if custom:
+            self._custom_ua_edit.setText(custom)
+        self._threads_spin.setValue(task["threads"])
+        self._timeout_spin.setValue(task["timeout"])

@@ -68,6 +68,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS backlinks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 donor_id INTEGER NOT NULL,
+                -- task_id is denormalised here for O(1) task-level backlink queries
+                -- without a JOIN through donors; removing it would require a schema migration.
                 task_id INTEGER NOT NULL,
                 target_url TEXT NOT NULL,
                 anchor_text TEXT,
@@ -113,6 +115,25 @@ def get_all_tasks() -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT * FROM tasks ORDER BY created_at DESC"
         ).fetchall()
+
+
+def get_all_tasks_with_counts() -> list[sqlite3.Row]:
+    """Single-query alternative to get_all_tasks() + per-task count calls.
+
+    Returns all task columns plus donor_count and backlink_count so callers
+    don't need to issue two extra SELECT COUNT queries per row (N+1 problem).
+    """
+    with get_connection() as conn:
+        return conn.execute("""
+            SELECT t.*,
+                   COUNT(DISTINCT d.id)  AS donor_count,
+                   COUNT(DISTINCT b.id)  AS backlink_count
+            FROM   tasks t
+            LEFT JOIN donors    d ON d.task_id = t.id
+            LEFT JOIN backlinks b ON b.task_id = t.id
+            GROUP BY t.id
+            ORDER BY t.created_at DESC
+        """).fetchall()
 
 
 def get_task(task_id: int) -> Optional[sqlite3.Row]:
@@ -185,6 +206,30 @@ def get_donors_for_task(task_id: int) -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT * FROM donors WHERE task_id = ? ORDER BY id", (task_id,)
         ).fetchall()
+
+
+def get_failed_donors_for_task(task_id: int) -> list[sqlite3.Row]:
+    """Return only donors whose last fetch failed (status = 'not_loaded')."""
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM donors WHERE task_id = ? AND status = 'not_loaded' ORDER BY id",
+            (task_id,),
+        ).fetchall()
+
+
+def reset_failed_donors(task_id: int) -> None:
+    """Reset only not_loaded donors to pending; leaves found/not_found rows intact."""
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE donors SET
+               status = 'pending', http_status = NULL, title = NULL,
+               canonical_url = NULL, internal_links = 0, external_links = 0,
+               index_google = NULL, index_yandex = NULL, index_bing = NULL,
+               index_baidu = NULL, meta_robots = NULL, x_robots_tag = NULL,
+               error_code = NULL, html_snippet = NULL
+               WHERE task_id = ? AND status = 'not_loaded'""",
+            (task_id,),
+        )
 
 
 _DONOR_COLUMNS = frozenset({
