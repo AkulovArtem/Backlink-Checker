@@ -6,30 +6,17 @@ import logging
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QSortFilterProxyModel, QDate
-from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor
+from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor, QPainter, QPalette
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QDateEdit, QTableView, QHeaderView,
-    QMenu, QAbstractItemView, QMessageBox,
-    QApplication, QStyle, QStyleOptionProgressBar, QStyledItemDelegate,
+    QMenu, QAbstractItemView, QStackedWidget, QStyledItemDelegate,
 )
 
 from db import database as db
+from gui.constants import STATUS_LABELS, STATUS_COLORS
 
 logger = logging.getLogger(__name__)
-
-STATUS_LABELS = {
-    "pending":   "⏳ В очереди",
-    "running":   "🔄 В процессе",
-    "completed": "✅ Завершено",
-    "error":     "❌ Ошибка",
-}
-STATUS_COLORS = {
-    "pending":   "#888888",
-    "running":   "#ffa726",
-    "completed": "#00c853",
-    "error":     "#ff5252",
-}
 
 COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
 
@@ -39,22 +26,28 @@ _PROGRESS_ROLE = Qt.ItemDataRole.UserRole
 
 
 class _ProgressDelegate(QStyledItemDelegate):
-    """Renders a QProgressBar inside the STATUS cell for running tasks."""
+    """Renders a progress bar inside the STATUS cell for running tasks."""
 
     def paint(self, painter, option, index):
         progress = index.data(_PROGRESS_ROLE)
         if isinstance(progress, int):
-            opt = QStyleOptionProgressBar()
-            opt.rect = option.rect.adjusted(2, 3, -2, -3)
-            opt.minimum = 0
-            opt.maximum = 100
-            opt.progress = progress
-            opt.text = f"🔄 {progress}%"
-            opt.textVisible = True
-            opt.textAlignment = Qt.AlignmentFlag.AlignCenter
-            QApplication.style().drawControl(
-                QStyle.ControlElement.CE_ProgressBar, opt, painter
-            )
+            rect = option.rect.adjusted(4, 4, -4, -4)
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            # Background — palette adapts to theme automatically
+            painter.setBrush(option.palette.color(QPalette.ColorRole.AlternateBase))
+            painter.drawRoundedRect(rect, 3, 3)
+            # Progress chunk
+            if progress > 0:
+                chunk_w = int(rect.width() * progress / 100)
+                chunk_rect = rect.adjusted(0, 0, -(rect.width() - chunk_w), 0)
+                painter.setBrush(QColor("#00c853"))
+                painter.drawRoundedRect(chunk_rect, 3, 3)
+            # Label
+            painter.setPen(option.palette.color(QPalette.ColorRole.Text))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"🔄 {progress}%")
+            painter.restore()
         else:
             super().paint(painter, option, index)
 
@@ -102,6 +95,7 @@ class TaskListView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._app = None   # set by app.py
+        self._task_row_index: dict[int, int] = {}
         self._build_ui()
         self.refresh()
 
@@ -176,14 +170,25 @@ class TaskListView(QWidget):
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._progress_delegate = _ProgressDelegate(self._table)
         self._table.setItemDelegateForColumn(COL_STATUS, self._progress_delegate)
-        root.addWidget(self._table)
+        self._table.clicked.connect(self._on_cell_clicked)
+
+        self._empty_lbl = QLabel("Нет заданий\n\nНажмите «+ Создать задание», чтобы начать")
+        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_lbl.setObjectName("secondary")
+
+        self._content_stack = QStackedWidget()
+        self._content_stack.addWidget(self._empty_lbl)  # 0
+        self._content_stack.addWidget(self._table)       # 1
+        self._content_stack.setCurrentIndex(1)
+        root.addWidget(self._content_stack)
 
     # ── Data ──────────────────────────────────────────────────────────────
 
     def refresh(self):
         self._model.removeRows(0, self._model.rowCount())
+        self._task_row_index = {}
         tasks = db.get_all_tasks_with_counts()   # single JOIN query — no N+1
-        for task in tasks:
+        for i, task in enumerate(tasks):
             donor_count = task["donor_count"]
             backlink_count = task["backlink_count"]
             status = task["status"]
@@ -218,30 +223,32 @@ class TaskListView(QWidget):
             items[5].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             self._model.appendRow(items)
+            self._task_row_index[task["id"]] = i
+
+        self._content_stack.setCurrentIndex(0 if not tasks else 1)
 
     def update_task_row(self, task_id: int):
         """Refresh a single row after worker emits progress."""
-        for row in range(self._model.rowCount()):
-            item = self._model.item(row, 0)
-            if item and item.data(Qt.ItemDataRole.UserRole) == task_id:
-                task = db.get_task(task_id)
-                if not task:
-                    return
-                status = task["status"]
-                progress = task["progress"]
-                status_label = STATUS_LABELS.get(status, status)
-                if status == "running" and progress > 0:
-                    status_label = f"🔄 В процессе ({progress}%)"
-                self._model.item(row, COL_STATUS).setText(status_label)
-                self._model.item(row, COL_STATUS).setForeground(
-                    QColor(STATUS_COLORS.get(status, "#888888"))
-                )
-                self._model.item(row, COL_STATUS).setData(
-                    progress if status == "running" else None, _PROGRESS_ROLE
-                )
-                bl = db.count_task_backlinks(task_id)
-                self._model.item(row, COL_BACKLINKS).setText(str(bl))
-                return
+        row = self._task_row_index.get(task_id)
+        if row is None:
+            return
+        task = db.get_task(task_id)
+        if not task:
+            return
+        status = task["status"]
+        progress = task["progress"]
+        status_label = STATUS_LABELS.get(status, status)
+        if status == "running" and progress > 0:
+            status_label = f"🔄 В процессе ({progress}%)"
+        self._model.item(row, COL_STATUS).setText(status_label)
+        self._model.item(row, COL_STATUS).setForeground(
+            QColor(STATUS_COLORS.get(status, "#888888"))
+        )
+        self._model.item(row, COL_STATUS).setData(
+            progress if status == "running" else None, _PROGRESS_ROLE
+        )
+        bl = db.count_task_backlinks(task_id)
+        self._model.item(row, COL_BACKLINKS).setText(str(bl))
 
     # ── Filtering ─────────────────────────────────────────────────────────
 
@@ -259,7 +266,13 @@ class TaskListView(QWidget):
         item = self._model.item(source_row, 0)
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
+    def _on_cell_clicked(self, index):
+        if index.column() == 5:
+            self._show_context_menu(self._table.visualRect(index).center())
+
     def _on_row_double_click(self, index):
+        if index.column() == 5:
+            return
         task_id = self._get_task_id_for_proxy_row(index.row())
         if task_id and self._app:
             self._app.show_report(task_id)
@@ -299,14 +312,5 @@ class TaskListView(QWidget):
             self._confirm_delete(task_id)
 
     def _confirm_delete(self, task_id: int) -> None:
-        task = db.get_task(task_id)
-        name = task["name"] if task else f"#{task_id}"
-        reply = QMessageBox.question(
-            self,
-            "Удалить задание",
-            f"Удалить задание «{name}»?\n\nВсе доноры и бэклинки будут удалены безвозвратно.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self._app.delete_task(task_id)  # type: ignore[union-attr]
+        if self._app:
+            self._app.confirm_and_delete_task(task_id, self)

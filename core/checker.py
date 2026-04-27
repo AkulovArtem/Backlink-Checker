@@ -156,17 +156,26 @@ async def run_check(
             async with semaphore:
                 if stop_event.is_set():
                     return
-                context = await browser.new_context(
-                    user_agent=profile.user_agent,
-                    viewport={"width": profile.viewport_width, "height": profile.viewport_height},
-                    is_mobile=profile.is_mobile,
-                )
-                page = await context.new_page()
                 try:
-                    donor_result = await _check_one(page, donor_id, url, config)
-                finally:
-                    await page.close()
-                    await context.close()
+                    context = await browser.new_context(
+                        user_agent=profile.user_agent,
+                        viewport={"width": profile.viewport_width, "height": profile.viewport_height},
+                        is_mobile=profile.is_mobile,
+                    )
+                    try:
+                        page = await context.new_page()
+                        try:
+                            donor_result = await _check_one(page, donor_id, url, config)
+                        finally:
+                            await page.close()
+                    finally:
+                        await context.close()
+                except Exception as exc:
+                    logger.exception("Context/page error for %s: %s", url, exc)
+                    donor_result = DonorResult(
+                        donor_id=donor_id, url=url,
+                        status="not_loaded", error_code="UNKNOWN",
+                    )
 
                 try:
                     result_callback(donor_result)

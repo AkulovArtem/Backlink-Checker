@@ -46,19 +46,3 @@ class CheckConfig:
     custom_user_agent: str = ""
     threads: int = 5
     timeout: int = 30   # seconds
-
-
-@dataclass
-class Task:
-    id: int
-    name: str
-    created_at: str
-    status: str           # pending | running | completed | error
-    progress: int         # 0-100
-    user_agent: str
-    custom_user_agent: Optional[str]
-    threads: int
-    timeout: int
-    target_domains: list[str]
-    donor_count: int = 0
-    backlink_count: int = 0
