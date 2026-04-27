@@ -13,10 +13,11 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QTabWidget, QLineEdit, QProgressBar, QScrollArea, QMenu,
-    QAbstractItemView, QMessageBox, QDialog, QTextEdit, QApplication,
+    QAbstractItemView, QDialog, QTextEdit, QApplication,
 )
 
 from db import database as db
+from gui.constants import STATUS_LABELS
 from utils.url_utils import get_domain, normalize_domain, matches_target
 
 
@@ -28,11 +29,11 @@ def _clipboard_set(text: str) -> None:
 
 logger = logging.getLogger(__name__)
 
-STATUS_LABELS = {
-    "pending":    "⏳ В очереди",
-    "running":    "🔄 В процессе",
-    "completed":  "✅ Завершено",
-    "error":      "❌ Ошибка",
+_SE_INDEX_COL = {
+    "google": "index_google",
+    "yandex": "index_yandex",
+    "bing":   "index_bing",
+    "baidu":  "index_baidu",
 }
 
 REL_COLORS = {
@@ -95,6 +96,9 @@ class ReportView(QWidget):
         self._donors_cache: list = []
         self._backlinks_cache: list = []
         self._bl_donor_map_cache: dict = {}
+        self._type_btns: dict[str, QPushButton] = {}
+        self._index_btns: dict[str, QPushButton] = {}
+        self._status_btns: dict[str, QPushButton] = {}
         self._build_ui()
 
     def set_app(self, app):
@@ -111,6 +115,7 @@ class ReportView(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         self._container = QWidget()
+        self._container.setMinimumWidth(800)
         self._root = QVBoxLayout(self._container)
         self._root.setContentsMargins(24, 24, 24, 24)
         self._root.setSpacing(16)
@@ -189,10 +194,7 @@ class ReportView(QWidget):
         text_count = sum(1 for bl in backlinks if bl["anchor_type"] == "text")
         img_count = len(backlinks) - text_count
 
-        _idx_col = {
-            "google": "index_google", "yandex": "index_yandex",
-            "bing": "index_bing", "baidu": "index_baidu",
-        }.get(self._current_se, "index_google")
+        _idx_col = _SE_INDEX_COL.get(self._current_se, "index_google")
         open_count = sum(1 for d in donors if d[_idx_col] == "open")
         closed_count = total_donors - open_count
 
@@ -310,16 +312,16 @@ class ReportView(QWidget):
             "dofollow", "nofollow", "#00c853", "#ff5252"
         ))
 
-        # Unique domains DF/NF
+        # Unique donor domains that carry dofollow / nofollow links
         df_domains = len({
-            get_domain(bl["target_url"])
+            get_domain(donor_map.get(bl["donor_id"], ""))
             for bl in backlinks
-            if bl["rel_type"] == "dofollow" and bl["target_url"]
+            if bl["rel_type"] == "dofollow" and donor_map.get(bl["donor_id"])
         })
         nf_domains = len({
-            get_domain(bl["target_url"])
+            get_domain(donor_map.get(bl["donor_id"], ""))
             for bl in backlinks
-            if bl["rel_type"] != "dofollow" and bl["target_url"]
+            if bl["rel_type"] != "dofollow" and donor_map.get(bl["donor_id"])
         })
         analytics_row.addWidget(_analytics_block(
             "ССЫЛАЮЩИЕСЯ ДОМЕНЫ: DF / NF", df_domains, nf_domains,
@@ -457,6 +459,10 @@ class ReportView(QWidget):
         layout.addWidget(self._donor_search)
 
         # Filters row
+        self._type_btns = {}
+        self._index_btns = {}
+        self._status_btns = {}
+
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("ТИП:"))
         for key, label in [("all","Все"),("dofollow","Dofollow"),("nofollow","Nofollow"),
@@ -465,6 +471,7 @@ class ReportView(QWidget):
             btn.setCheckable(True)
             btn.setChecked(key == self._donor_filter_type)
             btn.clicked.connect(lambda _, k=key: self._set_type_filter(k))
+            self._type_btns[key] = btn
             filter_row.addWidget(btn)
 
         filter_row.addSpacing(16)
@@ -474,6 +481,7 @@ class ReportView(QWidget):
             btn.setCheckable(True)
             btn.setChecked(key == self._donor_filter_index)
             btn.clicked.connect(lambda _, k=key: self._set_index_filter(k))
+            self._index_btns[key] = btn
             filter_row.addWidget(btn)
 
         filter_row.addSpacing(16)
@@ -484,6 +492,7 @@ class ReportView(QWidget):
             btn.setCheckable(True)
             btn.setChecked(key == self._donor_filter_status)
             btn.clicked.connect(lambda _, k=key: self._set_status_filter(k))
+            self._status_btns[key] = btn
             filter_row.addWidget(btn)
 
         filter_row.addStretch()
@@ -527,10 +536,7 @@ class ReportView(QWidget):
             if search_text and search_text not in donor["url"].lower():
                 continue
             if self._donor_filter_index != "all":
-                _se_col_filter = {
-                    "google": "index_google", "yandex": "index_yandex",
-                    "bing": "index_bing", "baidu": "index_baidu",
-                }.get(self._current_se, "index_google")
+                _se_col_filter = _SE_INDEX_COL.get(self._current_se, "index_google")
                 if donor[_se_col_filter] != self._donor_filter_index:
                     continue
             if self._donor_filter_status != "all":
@@ -559,10 +565,7 @@ class ReportView(QWidget):
             self._donor_table.setCellWidget(row, 0, url_cell)
 
             # Column 1: indexability — use active SE tab
-            _se_col = {
-                "google": "index_google", "yandex": "index_yandex",
-                "bing": "index_bing", "baidu": "index_baidu",
-            }.get(self._current_se, "index_google")
+            _se_col = _SE_INDEX_COL.get(self._current_se, "index_google")
             idx_val = donor[_se_col]  # None = not yet checked
             if idx_val == "open":
                 idx_color = "#00c853"
@@ -602,14 +605,20 @@ class ReportView(QWidget):
 
     def _set_type_filter(self, key):
         self._donor_filter_type = key
+        for k, btn in self._type_btns.items():
+            btn.setChecked(k == key)
         self._refilter()
 
     def _set_index_filter(self, key):
         self._donor_filter_index = key
+        for k, btn in self._index_btns.items():
+            btn.setChecked(k == key)
         self._refilter()
 
     def _set_status_filter(self, key):
         self._donor_filter_status = key
+        for k, btn in self._status_btns.items():
+            btn.setChecked(k == key)
         self._refilter()
 
     # ── Backlinks tab ─────────────────────────────────────────────────────
@@ -823,7 +832,8 @@ class ReportView(QWidget):
     def _show_context_dialog(self, context_html: str) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("HTML-контекст ссылки")
-        dialog.resize(860, 340)
+        dialog.setMinimumSize(400, 160)
+        dialog.setMaximumSize(1100, 560)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
@@ -838,6 +848,7 @@ class ReportView(QWidget):
         close_btn.clicked.connect(dialog.accept)
         layout.addWidget(close_btn)
 
+        dialog.adjustSize()
         dialog.exec()
 
     # ── Donors context menu ───────────────────────────────────────────────
@@ -873,10 +884,7 @@ class ReportView(QWidget):
         """Refresh the ИНДЕКСИРУЕМОСТЬ card to match the active SE tab."""
         if not hasattr(self, "_idx_nums_lbl") or not self._donors_cache:
             return
-        col = {
-            "google": "index_google", "yandex": "index_yandex",
-            "bing": "index_bing", "baidu": "index_baidu",
-        }.get(self._current_se, "index_google")
+        col = _SE_INDEX_COL.get(self._current_se, "index_google")
         open_count = sum(1 for d in self._donors_cache if d[col] == "open")
         closed_count = len(self._donors_cache) - open_count
         self._idx_nums_lbl.setText(f"{open_count} / {closed_count}")
@@ -900,19 +908,8 @@ class ReportView(QWidget):
         menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _confirm_delete(self) -> None:
-        if not self._app or not self._task_id:
-            return
-        task = db.get_task(self._task_id)
-        name = task["name"] if task else f"#{self._task_id}"
-        reply = QMessageBox.question(
-            self,
-            "Удалить задание",
-            f"Удалить задание «{name}»?\n\nВсе доноры и бэклинки будут удалены безвозвратно.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self._app.delete_task(self._task_id)
+        if self._app and self._task_id:
+            self._app.confirm_and_delete_task(self._task_id, self)
 
     def _go_back(self):
         if self._app:

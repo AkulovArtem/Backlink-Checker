@@ -38,12 +38,12 @@ def _extract_anchor(tag) -> tuple[str, str]:
     return title, "text"
 
 
-def _get_rel_type(tag, page_noindex: bool) -> str:
+def _get_rel_type(tag, page_nofollow: bool) -> str:
     """
     Determine rel type for a single <a> tag.
     If page-level robots says nofollow → all links are nofollow.
     """
-    if page_noindex:
+    if page_nofollow:
         return "nofollow"
     rel_values = set(tag.get("rel") or [])
     for val in ("sponsored", "ugc", "nofollow"):

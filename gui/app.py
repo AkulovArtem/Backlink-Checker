@@ -116,7 +116,12 @@ class MainApp(QMainWindow):
 
         worker = CheckWorker(config)
         self._workers[task_id] = worker
+        self._wire_worker(worker, task_id)
+        logger.info("Task %d started", task_id)
 
+    # ── Worker lifecycle helpers ──────────────────────────────────────────
+
+    def _wire_worker(self, worker: CheckWorker, task_id: int) -> None:
         worker.progress_updated.connect(
             lambda done, total, tid=task_id: self._on_progress(tid, done, total)
         )
@@ -127,9 +132,6 @@ class MainApp(QMainWindow):
             lambda ok, tid=task_id: self._on_finished(tid, ok)
         )
         worker.start()
-        logger.info("Task %d started", task_id)
-
-    # ── Worker lifecycle helpers ──────────────────────────────────────────
 
     def _stop_worker(self, worker: CheckWorker) -> None:
         """Signal worker to stop and wait without freezing the GUI event loop."""
@@ -176,16 +178,7 @@ class MainApp(QMainWindow):
         )
         worker = CheckWorker(config)
         self._workers[task_id] = worker
-        worker.progress_updated.connect(
-            lambda done, total, tid=task_id: self._on_progress(tid, done, total)
-        )
-        worker.donor_done.connect(
-            lambda result, tid=task_id: self._list_view.update_task_row(tid)
-        )
-        worker.finished.connect(
-            lambda ok, tid=task_id: self._on_finished(tid, ok)
-        )
-        worker.start()
+        self._wire_worker(worker, task_id)
         self._list_view.refresh()
         logger.info("Task %d: retrying %d failed donor(s)", task_id, len(failed))
 
@@ -212,6 +205,19 @@ class MainApp(QMainWindow):
         else:
             self._list_view.refresh()
         logger.info("Task %d deleted", task_id)
+
+    def confirm_and_delete_task(self, task_id: int, parent) -> None:
+        task = db.get_task(task_id)
+        name = task["name"] if task else f"#{task_id}"
+        reply = QMessageBox.question(
+            parent,
+            "Удалить задание",
+            f"Удалить задание «{name}»?\n\nВсе доноры и бэклинки будут удалены безвозвратно.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.delete_task(task_id)
 
     def export_task(self, task_id: int):
         path, _ = QFileDialog.getSaveFileName(

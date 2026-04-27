@@ -110,13 +110,6 @@ def create_task(name: str, target_domains: list[str], user_agent: str = "desktop
         return cur.lastrowid or 0
 
 
-def get_all_tasks() -> list[sqlite3.Row]:
-    with get_connection() as conn:
-        return conn.execute(
-            "SELECT * FROM tasks ORDER BY created_at DESC"
-        ).fetchall()
-
-
 def get_all_tasks_with_counts() -> list[sqlite3.Row]:
     """Single-query alternative to get_all_tasks() + per-task count calls.
 
