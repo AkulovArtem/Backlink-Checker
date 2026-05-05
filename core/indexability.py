@@ -52,14 +52,17 @@ def check_indexability(soup: BeautifulSoup, response_headers: dict) -> Indexabil
 
     x_robots_directives: dict[str, set[str]] = {}
     if x_robots_raw:
-        # X-Robots-Tag can be: "noindex" or "googlebot: noindex"
+        # X-Robots-Tag can be: "noindex" or "googlebot: noindex" or mixed
+        # e.g. "noindex, noarchive" — multiple parts share the same "robots" key,
+        # so we must merge (update) rather than overwrite.
         for part in x_robots_raw.split(","):
             part = part.strip()
             if ":" in part:
                 bot, _, directive = part.partition(":")
-                x_robots_directives[bot.strip().lower()] = _parse_directives(directive)
+                key = bot.strip().lower()
+                x_robots_directives.setdefault(key, set()).update(_parse_directives(directive))
             else:
-                x_robots_directives["robots"] = _parse_directives(part)
+                x_robots_directives.setdefault("robots", set()).update(_parse_directives(part))
 
     # ── Determine indexability per bot ────────────────────────────────────
     def _bot_is_closed(bot_key: str) -> bool:

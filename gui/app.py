@@ -8,12 +8,13 @@ import logging
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QStackedWidget, QFileDialog,
-    QHBoxLayout, QVBoxLayout, QPushButton, QApplication, QMessageBox,
+    QHBoxLayout, QVBoxLayout, QApplication, QMessageBox,
 )
 
 from db import database as db
 from core.models import CheckConfig
 from gui.theme import DARK_QSS, LIGHT_QSS
+from gui.theme_toggle import ThemeToggle
 from gui.task_list_view import TaskListView
 from gui.task_create_view import TaskCreateView
 from gui.report_view import ReportView
@@ -30,7 +31,7 @@ SCREEN_REPORT = 2
 class MainApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Backlink Checker")
+        self.setWindowTitle("Backlink Checker - проверка обратных ссылок | Version 1.0.1")
         self.setMinimumSize(1200, 700)
         self.resize(1400, 800)
 
@@ -54,10 +55,8 @@ class MainApp(QMainWindow):
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 4, 12, 0)
         top_bar.addStretch()
-        self._theme_btn = QPushButton("☀" if self._dark_mode else "🌙")
-        self._theme_btn.setFixedSize(32, 32)
-        self._theme_btn.setToolTip("Переключить тему")
-        self._theme_btn.clicked.connect(self._toggle_theme)
+        self._theme_btn = ThemeToggle(self._dark_mode)
+        self._theme_btn.toggled.connect(self._toggle_theme)
         top_bar.addWidget(self._theme_btn)
         main_layout.addLayout(top_bar)
 
@@ -102,7 +101,11 @@ class MainApp(QMainWindow):
             return
 
         donors = db.get_donors_for_task(task_id)
-        target_domains = json.loads(task["target_domains"])
+        try:
+            target_domains = json.loads(task["target_domains"])
+        except (json.JSONDecodeError, TypeError):
+            logger.error("Corrupted target_domains for task %d", task_id)
+            return
 
         config = CheckConfig(
             task_id=task_id,
@@ -166,7 +169,11 @@ class MainApp(QMainWindow):
             return
 
         db.reset_failed_donors(task_id)
-        target_domains = json.loads(task["target_domains"])
+        try:
+            target_domains = json.loads(task["target_domains"])
+        except (json.JSONDecodeError, TypeError):
+            logger.error("Corrupted target_domains for task %d", task_id)
+            return
         config = CheckConfig(
             task_id=task_id,
             donor_urls=[(int(d["id"]), str(d["url"])) for d in failed],
@@ -261,11 +268,10 @@ class MainApp(QMainWindow):
 
     # ── Theme ─────────────────────────────────────────────────────────────
 
-    def _toggle_theme(self):
-        self._dark_mode = not self._dark_mode
+    def _toggle_theme(self, checked: bool):
+        self._dark_mode = checked
         db.set_setting("theme", "dark" if self._dark_mode else "light")
         self._apply_theme()
-        self._theme_btn.setText("☀" if self._dark_mode else "🌙")
 
     def _apply_theme(self):
         QApplication.instance().setStyleSheet(DARK_QSS if self._dark_mode else LIGHT_QSS)

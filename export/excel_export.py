@@ -241,7 +241,11 @@ def export_to_excel(task_id: int, output_path: str) -> None:
     if not task:
         raise ValueError(f"Task {task_id} not found")
 
-    target_domains = json.loads(task["target_domains"])
+    try:
+        target_domains = json.loads(task["target_domains"])
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.error("Corrupted target_domains for task %d: %s", task_id, exc)
+        raise ValueError(f"Task {task_id} has corrupted target_domains") from exc
     donors = db.get_donors_for_task(task_id)
     backlinks = db.get_backlinks_for_task(task_id)
     anchor_stats = db.get_anchor_stats(task_id)

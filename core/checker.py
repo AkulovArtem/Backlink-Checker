@@ -203,6 +203,9 @@ async def run_check(
             # otherwise pages in flight get a PWError mid-navigation.
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception as exc:
+                logger.exception("Error closing browser: %s", exc)
 
     logger.info("Check complete: %d/%d", done_count, total)
