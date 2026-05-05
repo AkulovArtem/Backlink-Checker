@@ -7,7 +7,21 @@
       "Bash(pip list *)",
       "Bash(python -m bandit -r . -l --exclude .git,.ruff_cache,.mypy_cache)",
       "Bash(pip install *)",
-      "Bash(bash *)"
+      "Bash(bash *)",
+      "Bash(python -c ' *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\2mrha\\\\PycharmProjects\\\\Parsers\\\\Backlink Checker\" -Recurse -Filter \"*.py\")",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "Bash(pip --version)",
+      "Bash(findstr /i \"pyqt6 playwright beautifulsoup4 openpyxl lxml flake8 ruff pyflakes\")",
+      "Bash(ruff check *)",
+      "PowerShell(python -m ruff --version 2>&1; python -m flake8 --version 2>&1; python -m py_compile --help 2>&1 | Select-Object -First 2)",
+      "Bash(python -c \"import gui.app\")"
     ]
   }
 }
