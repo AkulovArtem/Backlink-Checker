@@ -7,19 +7,25 @@ import logging
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QStackedWidget, QFileDialog,
-    QHBoxLayout, QVBoxLayout, QApplication, QMessageBox,
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QMainWindow,
+    QMessageBox,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
-from db import database as db
 from core.models import CheckConfig
+from db import database as db
+from export.excel_export import export_to_excel
+from gui.report_view import ReportView
+from gui.task_create_view import TaskCreateView
+from gui.task_list_view import TaskListView
 from gui.theme import DARK_QSS, LIGHT_QSS
 from gui.theme_toggle import ThemeToggle
-from gui.task_list_view import TaskListView
-from gui.task_create_view import TaskCreateView
-from gui.report_view import ReportView
 from gui.worker import CheckWorker
-from export.excel_export import export_to_excel
 
 logger = logging.getLogger(__name__)
 

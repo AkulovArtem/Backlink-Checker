@@ -7,11 +7,13 @@ import asyncio
 import logging
 from typing import Callable
 
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout, Error as PWError
+from playwright.async_api import Error as PWError
+from playwright.async_api import TimeoutError as PWTimeout
+from playwright.async_api import async_playwright
 
+from core.indexability import check_indexability
 from core.models import CheckConfig, DonorResult
 from core.parser import parse_page
-from core.indexability import check_indexability
 from utils.user_agents import get_profile
 
 logger = logging.getLogger(__name__)

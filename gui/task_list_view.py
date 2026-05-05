@@ -5,16 +5,34 @@ Screen 1: Task list with search, date filters, sortable table, context menu.
 import logging
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QSortFilterProxyModel, QDate
-from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor, QPainter, QPalette, QTextCharFormat
+from PyQt6.QtCore import QDate, QSortFilterProxyModel, Qt
+from PyQt6.QtGui import (
+    QColor,
+    QPainter,
+    QPalette,
+    QStandardItem,
+    QStandardItemModel,
+    QTextCharFormat,
+)
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QDateEdit, QCalendarWidget, QTableView, QHeaderView,
-    QMenu, QAbstractItemView, QStackedWidget, QStyledItemDelegate,
+    QAbstractItemView,
+    QCalendarWidget,
+    QDateEdit,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QStackedWidget,
+    QStyledItemDelegate,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
 )
 
 from db import database as db
-from gui.constants import STATUS_LABELS, STATUS_COLORS
+from gui.constants import STATUS_COLORS, STATUS_LABELS
 
 logger = logging.getLogger(__name__)
 

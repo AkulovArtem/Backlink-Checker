@@ -1,6 +1,6 @@
-from PyQt6.QtCore import Qt, QRectF, QPointF, QEvent
-from PyQt6.QtGui import QPainter, QPen, QColor, QFont
-from PyQt6.QtWidgets import QWidget, QSizePolicy
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 
 class LinkIcon(QWidget):

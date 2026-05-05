@@ -9,8 +9,8 @@ import sys
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from core.models import CheckConfig, DonorResult
 from core.checker import run_check
+from core.models import CheckConfig, DonorResult
 from db import database as db
 
 logger = logging.getLogger(__name__)

@@ -7,18 +7,39 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QUrl, QRectF
-from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPalette
+from PyQt6.QtCore import QRectF, Qt, QUrl
+from PyQt6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QPainter,
+    QPainterPath,
+    QPalette,
+)
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QTabWidget, QLineEdit, QScrollArea, QMenu, QSizePolicy,
-    QAbstractItemView, QDialog, QTextEdit, QApplication,
+    QAbstractItemView,
+    QApplication,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
 from db import database as db
 from gui.constants import STATUS_LABELS
-from utils.url_utils import get_domain, normalize_domain, matches_target
+from utils.url_utils import get_domain, matches_target, normalize_domain
 
 
 def _clipboard_set(text: str) -> None:
@@ -357,7 +378,6 @@ class ReportView(QWidget):
             fl.setContentsMargins(16, 14, 16, 14)
             fl.setSpacing(6)
             fl.addWidget(_secondary(title))
-            total = a_val + b_val
             nums_lbl = QLabel(f"{a_val} / {b_val}")
             nums_lbl.setStyleSheet("font-size: 20px; font-weight: 700;")
             fl.addWidget(nums_lbl)

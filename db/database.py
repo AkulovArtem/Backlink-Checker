@@ -1,6 +1,6 @@
-import sqlite3
 import json
 import logging
+import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
