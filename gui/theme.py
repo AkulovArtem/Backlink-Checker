@@ -15,7 +15,7 @@ QMainWindow, QDialog, QWidget {{
 QFrame#card {{
     background-color: {surface};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: 12px;
 }}
 
 QPushButton {{
@@ -31,7 +31,7 @@ QPushButton:checked {{ background-color: #00c853; color: #fff; border: none; }}
 
 QPushButton#btnCreate {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #00c853, stop:1 #00bcd4);
+        stop:0 #34AADC, stop:1 #007AFF);
     color: #fff;
     font-weight: bold;
     border: none;
@@ -40,10 +40,10 @@ QPushButton#btnCreate {{
 }}
 QPushButton#btnCreate:hover {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #00e676, stop:1 #00e5ff);
+        stop:0 #47B7E8, stop:1 #1C8FFF);
 }}
 
-QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox, QDateEdit {{
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {{
     background-color: {input_bg};
     color: {text};
     border: 1px solid {border_ctrl};
@@ -59,6 +59,7 @@ QComboBox QAbstractItemView {{
     background-color: {surface};
     color: {text};
     selection-background-color: {selection};
+    selection-color: #ffffff;
 }}
 
 QTableWidget, QTableView {{
@@ -70,6 +71,7 @@ QTableWidget, QTableView {{
 }}
 QTableWidget::item:selected, QTableView::item:selected {{
     background-color: {selection};
+    color: #ffffff;
 }}
 QHeaderView::section {{
     background-color: {surface};
@@ -140,7 +142,80 @@ QMenu {{
     border-radius: 6px;
     padding: 4px;
 }}
-QMenu::item:selected {{ background-color: {selection}; border-radius: 4px; }}
+QMenu::item:selected {{ background-color: {selection}; color: #ffffff; border-radius: 4px; }}
+
+/* ── QDateEdit — iOS style (standalone, not in group) ───────────────── */
+QDateEdit {{
+    background-color: {input_bg};
+    color: {text};
+    border: 1px solid {border_ctrl};
+    border-radius: 6px;
+    padding: 5px 10px;
+    min-width: 108px;
+    selection-background-color: #007AFF;
+    selection-color: #ffffff;
+}}
+QDateEdit:focus {{
+    border: 1.5px solid #007AFF;
+}}
+QDateEdit::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 26px;
+    border: none;
+    border-left: 1px solid {border_ctrl};
+    border-radius: 0 5px 5px 0;
+    background: rgba(0, 122, 255, 18);
+}}
+QDateEdit::down-arrow {{ image: none; }}
+
+/* ── QCalendarWidget — iOS style ────────────────────────────────────── */
+QCalendarWidget {{
+    background-color: {surface};
+    border: 1px solid {border};
+}}
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+    background-color: {surface};
+    padding: 8px 6px;
+}}
+QCalendarWidget QToolButton {{
+    color: #007AFF;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-weight: bold;
+    font-size: 13px;
+    min-width: 30px;
+    min-height: 28px;
+}}
+QCalendarWidget QToolButton:hover {{
+    background: rgba(0, 122, 255, 28);
+}}
+QCalendarWidget QToolButton::menu-indicator {{ image: none; }}
+QCalendarWidget QSpinBox {{
+    color: {text};
+    background: transparent;
+    border: none;
+    font-weight: bold;
+    font-size: 13px;
+    selection-background-color: #007AFF;
+    selection-color: #fff;
+}}
+QCalendarWidget QSpinBox::up-button,
+QCalendarWidget QSpinBox::down-button {{ width: 0; height: 0; }}
+QCalendarWidget QAbstractItemView {{
+    background-color: {surface};
+    color: {text};
+    selection-background-color: #007AFF;
+    selection-color: #fff;
+    alternate-background-color: {surface};
+    border: none;
+    outline: 0;
+}}
+QCalendarWidget QAbstractItemView:disabled {{
+    color: {muted};
+}}
 """
 
 
@@ -178,7 +253,7 @@ LIGHT_QSS = _make_qss(
     btn_border="#bdbdbd",
     btn_hover="#bdbdbd",
     btn_pressed="#9e9e9e",
-    selection="#e0f7fa",
+    selection="#007AFF",
     scroll_bg="#f5f5f5",
     scroll_handle="#bdbdbd",
     alt_row="#fafafa",

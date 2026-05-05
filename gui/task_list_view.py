@@ -6,10 +6,10 @@ import logging
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QSortFilterProxyModel, QDate
-from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor, QPainter, QPalette
+from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor, QPainter, QPalette, QTextCharFormat
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QDateEdit, QTableView, QHeaderView,
+    QLineEdit, QDateEdit, QCalendarWidget, QTableView, QHeaderView,
     QMenu, QAbstractItemView, QStackedWidget, QStyledItemDelegate,
 )
 
@@ -50,6 +50,16 @@ class _ProgressDelegate(QStyledItemDelegate):
             painter.restore()
         else:
             super().paint(painter, option, index)
+
+
+def _configure_calendar(de: QDateEdit) -> None:
+    """Attach a pre-configured QCalendarWidget: no grid, no red weekends."""
+    cal = QCalendarWidget()
+    cal.setGridVisible(False)
+    plain = QTextCharFormat()
+    cal.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, plain)
+    cal.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, plain)
+    de.setCalendarWidget(cal)
 
 
 class _TaskFilterProxy(QSortFilterProxyModel):
@@ -111,7 +121,7 @@ class TaskListView(QWidget):
 
         # Header
         header = QHBoxLayout()
-        lbl = QLabel("🔗  Проверка обратных ссылок")
+        lbl = QLabel("Проверка обратных ссылок")
         lbl.setObjectName("heading")
         header.addWidget(lbl)
         header.addStretch()
@@ -134,6 +144,7 @@ class TaskListView(QWidget):
         self._date_from.setSpecialValueText("Дата начала")
         self._date_from.setDate(QDate(2000, 1, 1))
         self._date_from.dateChanged.connect(self._apply_filter)
+        _configure_calendar(self._date_from)
         filter_bar.addWidget(QLabel("от"), 0)
         filter_bar.addWidget(self._date_from, 1)
 
@@ -142,6 +153,7 @@ class TaskListView(QWidget):
         self._date_to.setCalendarPopup(True)
         self._date_to.setDate(QDate.currentDate())
         self._date_to.dateChanged.connect(self._apply_filter)
+        _configure_calendar(self._date_to)
         filter_bar.addWidget(QLabel("до"), 0)
         filter_bar.addWidget(self._date_to, 1)
 
@@ -293,7 +305,7 @@ class TaskListView(QWidget):
 
         menu = QMenu(self)
         act_retry        = menu.addAction("Повторить проверку")
-        act_retry_failed = menu.addAction("Повторить упавшие доноры")
+        act_retry_failed = menu.addAction("Повторить неудачные")
         act_clone        = menu.addAction("Дублировать задание")
         act_export       = menu.addAction("Экспортировать в .xlsx")
         menu.addSeparator()

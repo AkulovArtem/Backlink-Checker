@@ -7,12 +7,12 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QColor, QDesktopServices, QFont
+from PyQt6.QtCore import Qt, QUrl, QRectF
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPalette
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QTabWidget, QLineEdit, QProgressBar, QScrollArea, QMenu,
+    QTabWidget, QLineEdit, QScrollArea, QMenu, QSizePolicy,
     QAbstractItemView, QDialog, QTextEdit, QApplication,
 )
 
@@ -59,10 +59,64 @@ def _secondary(text: str) -> QLabel:
 def _badge(text: str, color: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(
-        f"background-color: {color}22; color: {color}; border: 1px solid {color};"
-        "border-radius: 4px; padding: 1px 6px; font-size: 11px;"
+        f"background-color: {color}18; color: {color};"
+        "border: none; border-radius: 10px;"
+        "padding: 2px 10px; font-size: 11px; font-weight: 600;"
     )
     return lbl
+
+
+class _SegBar(QWidget):
+    """Segmented bar — fills proportionally with per-segment colours.
+
+    Pass `total` to anchor proportions to a fixed denominator (e.g. total
+    donors) so that unchecked/pending items show as the unfilled background
+    instead of being excluded from the ratio.
+    """
+
+    def __init__(self, segments: list[tuple[int, str]],
+                 total: int | None = None, parent=None):
+        super().__init__(parent)
+        self._segments = segments
+        self._total = total
+        self.setFixedHeight(8)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_segments(self, segments: list[tuple[int, str]],
+                     total: int | None = None) -> None:
+        self._segments = segments
+        if total is not None:
+            self._total = total
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        W, H = float(self.width()), float(self.height())
+        r = H / 2
+        full = QRectF(0.0, 0.0, W, H)
+        total = (self._total if self._total is not None
+                 else sum(v for v, _ in self._segments if v > 0))
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self.palette().color(QPalette.ColorRole.AlternateBase))
+        p.drawRoundedRect(full, r, r)
+
+        if total > 0:
+            clip = QPainterPath()
+            clip.addRoundedRect(full, r, r)
+            p.setClipPath(clip)
+            x = 0.0
+            for val, color in self._segments:
+                if val <= 0:
+                    continue
+                seg_w = W * val / total
+                p.setBrush(QColor(color))
+                p.drawRect(QRectF(x, 0.0, seg_w, H))
+                x += seg_w
+
+        p.end()
 
 
 def _card(title: str, value: str, subtitle: str = "") -> QFrame:
@@ -70,12 +124,14 @@ def _card(title: str, value: str, subtitle: str = "") -> QFrame:
     frame.setObjectName("card")
     frame.setMinimumWidth(160)
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setContentsMargins(16, 14, 16, 14)
+    layout.setSpacing(6)
     t = QLabel(title)
     t.setObjectName("secondary")
     layout.addWidget(t)
     v = QLabel(value)
-    v.setStyleSheet("font-size: 18px; font-weight: bold;")
+    v.setStyleSheet("font-size: 20px; font-weight: 700;")
+    v.setWordWrap(True)
     layout.addWidget(v)
     if subtitle:
         s = QLabel(subtitle)
@@ -195,8 +251,8 @@ class ReportView(QWidget):
         img_count = len(backlinks) - text_count
 
         _idx_col = _SE_INDEX_COL.get(self._current_se, "index_google")
-        open_count = sum(1 for d in donors if d[_idx_col] == "open")
-        closed_count = total_donors - open_count
+        open_count  = sum(1 for d in donors if d[_idx_col] == "open")
+        closed_count = sum(1 for d in donors if d[_idx_col] == "closed")
 
         # ── Header ────────────────────────────────────────────────────────
         header_row = QHBoxLayout()
@@ -207,7 +263,7 @@ class ReportView(QWidget):
         title_lbl = QLabel(task["name"].upper())
         title_lbl.setObjectName("heading")
         header_row.addWidget(title_lbl)
-        header_row.addWidget(_badge("Проверка обратных ссылок", "#ff8f00"))
+        header_row.addWidget(_badge("Проверка обратных ссылок", "#007AFF"))
 
         status = task["status"]
         status_color = {"completed": "#00c853", "error": "#ff5252", "running": "#ffa726"}.get(status, "#888")
@@ -237,16 +293,26 @@ class ReportView(QWidget):
         status_card.setObjectName("card")
         status_card.setMinimumWidth(200)
         sc_layout = QVBoxLayout(status_card)
-        sc_layout.setContentsMargins(12, 10, 12, 10)
+        sc_layout.setContentsMargins(16, 14, 16, 14)
+        sc_layout.setSpacing(6)
         sc_layout.addWidget(_secondary("СТАТУС ДОНОРОВ"))
-        nums = QLabel(f"✅ {found}  🔍 {not_found}  ❌ {not_loaded}")
-        nums.setStyleSheet("font-weight: bold;")
+        nums = QLabel(
+            f'<span style="color:#00c853"><b>{found}</b></span>'
+            f' / <span style="color:#ffa726"><b>{not_found}</b></span>'
+            f' / <span style="color:#ff5252"><b>{not_loaded}</b></span>'
+        )
+        nums.setStyleSheet("font-size: 16px;")
         sc_layout.addWidget(nums)
-        bar = QProgressBar()
-        bar.setMaximum(max(total_donors, 1))
-        bar.setValue(found)
-        bar.setTextVisible(False)
-        sc_layout.addWidget(bar)
+        sc_layout.addWidget(_SegBar([
+            (found,       "#00c853"),
+            (not_found,   "#ffa726"),
+            (not_loaded,  "#ff5252"),
+        ], total=total_donors))
+        sc_layout.addWidget(QLabel(
+            '<span style="color:#00c853">■ Найдено</span>'
+            '  <span style="color:#ffa726">■ Не найдено</span>'
+            '  <span style="color:#ff5252">■ Ошибка</span>'
+        ))
 
         cards_row.addWidget(status_card)
         self._root.addLayout(cards_row)
@@ -288,44 +354,45 @@ class ReportView(QWidget):
             frame = QFrame()
             frame.setObjectName("card")
             fl = QVBoxLayout(frame)
-            fl.setContentsMargins(12, 10, 12, 10)
+            fl.setContentsMargins(16, 14, 16, 14)
+            fl.setSpacing(6)
             fl.addWidget(_secondary(title))
             total = a_val + b_val
             nums_lbl = QLabel(f"{a_val} / {b_val}")
-            nums_lbl.setStyleSheet("font-size: 16px; font-weight: bold;")
+            nums_lbl.setStyleSheet("font-size: 20px; font-weight: 700;")
             fl.addWidget(nums_lbl)
-            bar2 = QProgressBar()
-            bar2.setMaximum(max(total, 1))
-            bar2.setValue(a_val)
-            bar2.setTextVisible(False)
-            bar2.setStyleSheet(
-                f"QProgressBar::chunk {{ background-color: {a_color}; }}"
+            fl.addWidget(_SegBar([(a_val, a_color), (b_val, b_color)]))
+            legend = QLabel(
+                f'<span style="color:{a_color}">■ {a_label}: {a_val}</span>'
+                f'  <span style="color:{b_color}">■ {b_label}: {b_val}</span>'
             )
-            fl.addWidget(bar2)
-            legend = QLabel(f"● {a_label}  ● {b_label}")
             legend.setObjectName("secondary")
             fl.addWidget(legend)
             return frame
 
         analytics_row.addWidget(_analytics_block(
             "DOFOLLOW / NOFOLLOW", df_count, nf_count,
-            "dofollow", "nofollow", "#00c853", "#ff5252"
+            "Dofollow", "Nofollow", "#007AFF", "#ff5252"
         ))
 
-        # Unique donor domains that carry dofollow / nofollow links
-        df_domains = len({
+        # Unique donor domains split by whether they have ANY dofollow link.
+        # Sets are mutually exclusive: DF = at least one DF backlink,
+        # NF = backlinks exist but none are dofollow.
+        _all_bl_domains = {
+            get_domain(donor_map.get(bl["donor_id"], ""))
+            for bl in backlinks
+            if donor_map.get(bl["donor_id"])
+        }
+        _df_domain_set = {
             get_domain(donor_map.get(bl["donor_id"], ""))
             for bl in backlinks
             if bl["rel_type"] == "dofollow" and donor_map.get(bl["donor_id"])
-        })
-        nf_domains = len({
-            get_domain(donor_map.get(bl["donor_id"], ""))
-            for bl in backlinks
-            if bl["rel_type"] != "dofollow" and donor_map.get(bl["donor_id"])
-        })
+        }
+        df_domains = len(_df_domain_set)
+        nf_domains = len(_all_bl_domains - _df_domain_set)
         analytics_row.addWidget(_analytics_block(
             "ССЫЛАЮЩИЕСЯ ДОМЕНЫ: DF / NF", df_domains, nf_domains,
-            "dofollow", "nofollow", "#00c853", "#ff5252"
+            "Dofollow", "Nofollow", "#007AFF", "#ff5252"
         ))
         analytics_row.addWidget(_analytics_block(
             "ТИПЫ АНКОРОВ", text_count, img_count,
@@ -335,22 +402,23 @@ class ReportView(QWidget):
         idx_frame = QFrame()
         idx_frame.setObjectName("card")
         idx_fl = QVBoxLayout(idx_frame)
-        idx_fl.setContentsMargins(12, 10, 12, 10)
+        idx_fl.setContentsMargins(16, 14, 16, 14)
+        idx_fl.setSpacing(6)
         idx_fl.addWidget(_secondary("ИНДЕКСИРУЕМОСТЬ"))
         self._idx_nums_lbl = QLabel(f"{open_count} / {closed_count}")
-        self._idx_nums_lbl.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self._idx_nums_lbl.setStyleSheet("font-size: 20px; font-weight: 700;")
         idx_fl.addWidget(self._idx_nums_lbl)
-        self._idx_bar = QProgressBar()
-        self._idx_bar.setMaximum(max(total_donors, 1))
-        self._idx_bar.setValue(open_count)
-        self._idx_bar.setTextVisible(False)
-        self._idx_bar.setStyleSheet(
-            "QProgressBar::chunk { background-color: #00c853; }"
+        self._idx_bar = _SegBar(
+            [(open_count, "#007AFF"), (closed_count, "#ff5252")],
+            total=total_donors,
         )
         idx_fl.addWidget(self._idx_bar)
-        idx_legend = QLabel("● Открыто  ● Закрыто")
-        idx_legend.setObjectName("secondary")
-        idx_fl.addWidget(idx_legend)
+        self._idx_legend_lbl = QLabel(
+            '<span style="color:#007AFF">■ Открыто</span>'
+            '  <span style="color:#ff5252">■ Закрыто</span>'
+        )
+        self._idx_legend_lbl.setObjectName("secondary")
+        idx_fl.addWidget(self._idx_legend_lbl)
         analytics_row.addWidget(idx_frame)
 
         self._root.addLayout(analytics_row)
@@ -555,7 +623,7 @@ class ReportView(QWidget):
 
             # Column 0: URL + status
             status_code = donor["http_status"]
-            color = HTTP_COLORS.get((status_code or 0) // 100, "#888") if status_code else "#888"
+            color = HTTP_COLORS.get(int(status_code) // 100, "#888") if status_code else "#888"
             status_str = str(status_code) if status_code else donor["error_code"] or "—"
             url_cell = QLabel(f'<b style="color:{color}">{status_str}</b>  '
                               f'<a href="{donor["url"]}">{donor["url"]}</a>')
@@ -885,11 +953,13 @@ class ReportView(QWidget):
         if not hasattr(self, "_idx_nums_lbl") or not self._donors_cache:
             return
         col = _SE_INDEX_COL.get(self._current_se, "index_google")
-        open_count = sum(1 for d in self._donors_cache if d[col] == "open")
-        closed_count = len(self._donors_cache) - open_count
+        open_count   = sum(1 for d in self._donors_cache if d[col] == "open")
+        closed_count = sum(1 for d in self._donors_cache if d[col] == "closed")
         self._idx_nums_lbl.setText(f"{open_count} / {closed_count}")
-        self._idx_bar.setMaximum(max(len(self._donors_cache), 1))
-        self._idx_bar.setValue(open_count)
+        self._idx_bar.set_segments(
+            [(open_count, "#007AFF"), (closed_count, "#ff5252")],
+            total=len(self._donors_cache),
+        )
 
     # ── Actions ───────────────────────────────────────────────────────────
 
@@ -897,7 +967,7 @@ class ReportView(QWidget):
         menu = QMenu(self)
         menu.addAction("Повторить проверку",
                        lambda: self._app and self._app.retry_task(self._task_id))
-        menu.addAction("Повторить упавшие доноры",
+        menu.addAction("Повторить неудачные",
                        lambda: self._app and self._app.retry_failed_task(self._task_id))
         menu.addAction("Дублировать задание",
                        lambda: self._app and self._app.clone_task(self._task_id))

@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from db import database as db
+from gui.icons import OrDivider
 from utils.user_agents import PROFILES
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,8 @@ def _circle_label(n: str) -> QLabel:
     lbl.setFixedSize(28, 28)
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lbl.setStyleSheet(
-        "background-color: #00c853; color: #fff; border-radius: 14px; font-weight: bold;"
+        "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #34AADC, stop:1 #007AFF);"
+        "color: #fff; border-radius: 14px; font-weight: bold;"
     )
     return lbl
 
@@ -89,15 +91,7 @@ class TaskCreateView(QWidget):
         hint1.setObjectName("secondary")
         root.addWidget(hint1)
 
-        or_row = QHBoxLayout()
-        line_l = QFrame()
-        line_l.setFrameShape(QFrame.Shape.HLine)
-        line_r = QFrame()
-        line_r.setFrameShape(QFrame.Shape.HLine)
-        or_row.addWidget(line_l)
-        or_row.addWidget(QLabel("или"))
-        or_row.addWidget(line_r)
-        root.addLayout(or_row)
+        root.addWidget(OrDivider())
 
         file_row = QHBoxLayout()
         self._file_btn = QPushButton("Выберите файл (.txt)")
