@@ -3,15 +3,25 @@ Screen 2: Create task form.
 """
 
 import json
-import re
 import logging
+import re
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QPlainTextEdit, QSpinBox, QComboBox, QFileDialog,
-    QFrame, QScrollArea, QGroupBox,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
 from db import database as db

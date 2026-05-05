@@ -7,11 +7,11 @@ import logging
 from datetime import datetime
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from db import database as db
-from utils.url_utils import normalize_domain, matches_target
+from utils.url_utils import matches_target, normalize_domain
 
 logger = logging.getLogger(__name__)
 

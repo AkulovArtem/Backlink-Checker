@@ -1,7 +1,14 @@
-from math import cos, sin, pi
+from math import cos, pi, sin
 
-from PyQt6.QtCore import Qt, QRectF, QPointF, QPropertyAnimation, pyqtProperty, QEasingCurve
-from PyQt6.QtGui import QPainter, QColor, QPainterPath, QPen
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+    pyqtProperty,
+)
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QAbstractButton
 
 

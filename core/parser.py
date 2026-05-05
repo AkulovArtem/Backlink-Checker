@@ -2,10 +2,11 @@
 Parse rendered HTML: extract title, canonical, all links, backlinks to target domains.
 """
 
-import re
 import html as _html_module
 import logging
+import re
 from urllib.parse import urljoin
+
 from bs4 import BeautifulSoup
 
 from core.models import BacklinkInfo

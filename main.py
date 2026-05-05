@@ -2,10 +2,10 @@
 Entry point for Backlink Checker desktop application.
 """
 
-import sys
 import logging
-from pathlib import Path
+import sys
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
 
