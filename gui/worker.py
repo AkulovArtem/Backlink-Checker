@@ -9,8 +9,8 @@ import sys
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from core.models import CheckConfig, DonorResult
 from core.checker import run_check
+from core.models import CheckConfig, DonorResult
 from db import database as db
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,6 @@ class CheckWorker(QThread):
         self.donor_done.emit(result)
 
     def _on_progress(self, done: int, total: int):
-        pct = int(done / total * 100) if total > 0 else 0
+        pct = max(0, min(100, int(done / total * 100))) if total > 0 else 0
         db.update_task_status(self._config.task_id, "running", pct)
         self.progress_updated.emit(done, total)

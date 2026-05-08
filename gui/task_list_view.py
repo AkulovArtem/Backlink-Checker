@@ -5,43 +5,136 @@ Screen 1: Task list with search, date filters, sortable table, context menu.
 import logging
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QSortFilterProxyModel, QDate
-from PyQt6.QtGui import QStandardItemModel, QStandardItem, QColor
+from PyQt6.QtCore import QDate, QSortFilterProxyModel, Qt, QUrl
+from PyQt6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QPainter,
+    QPalette,
+    QStandardItem,
+    QStandardItemModel,
+    QTextCharFormat,
+)
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QDateEdit, QTableView, QHeaderView,
-    QMenu, QAbstractItemView, QMessageBox,
+    QAbstractItemView,
+    QCalendarWidget,
+    QDateEdit,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QStackedWidget,
+    QStyledItemDelegate,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
 )
 
 from db import database as db
+from gui.constants import STATUS_COLORS, STATUS_LABELS
+from gui.theme_toggle import ThemeToggle
 
 logger = logging.getLogger(__name__)
 
-STATUS_LABELS = {
-    "pending":   "⏳ В очереди",
-    "running":   "🔄 В процессе",
-    "completed": "✅ Завершено",
-    "error":     "❌ Ошибка",
-}
-STATUS_COLORS = {
-    "pending":   "#888888",
-    "running":   "#ffa726",
-    "completed": "#00c853",
-    "error":     "#ff5252",
-}
-
 COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
+
+# UserRole on the COL_STATUS item stores the integer progress (0-100) for
+# running tasks; None for all other statuses so the delegate falls through.
+_PROGRESS_ROLE = Qt.ItemDataRole.UserRole
+
+
+class _ProgressDelegate(QStyledItemDelegate):
+    """Renders a progress bar inside the STATUS cell for running tasks."""
+
+    def paint(self, painter, option, index):
+        progress = index.data(_PROGRESS_ROLE)
+        if isinstance(progress, int):
+            rect = option.rect.adjusted(4, 4, -4, -4)
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            # Background — palette adapts to theme automatically
+            painter.setBrush(option.palette.color(QPalette.ColorRole.AlternateBase))
+            painter.drawRoundedRect(rect, 3, 3)
+            # Progress chunk
+            if progress > 0:
+                chunk_w = int(rect.width() * progress / 100)
+                chunk_rect = rect.adjusted(0, 0, -(rect.width() - chunk_w), 0)
+                painter.setBrush(QColor("#00c853"))
+                painter.drawRoundedRect(chunk_rect, 3, 3)
+            # Label
+            painter.setPen(option.palette.color(QPalette.ColorRole.Text))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"🔄 {progress}%")
+            painter.restore()
+        else:
+            super().paint(painter, option, index)
+
+
+def _configure_calendar(de: QDateEdit) -> None:
+    """Attach a pre-configured QCalendarWidget: no grid, no red weekends."""
+    cal = QCalendarWidget()
+    cal.setGridVisible(False)
+    plain = QTextCharFormat()
+    cal.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, plain)
+    cal.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, plain)
+    de.setCalendarWidget(cal)
+
+
+class _TaskFilterProxy(QSortFilterProxyModel):
+    """Proxy that filters tasks by name text and date range.
+    Uses filterAcceptsRow so filtering survives column sorting."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = ""
+        self._date_from = QDate(2000, 1, 1)
+        self._date_to = QDate.currentDate()
+
+    def set_filters(self, text: str, date_from: QDate, date_to: QDate) -> None:
+        self._text = text.lower()
+        self._date_from = date_from
+        self._date_to = date_to
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
+        model = self.sourceModel()
+        if not isinstance(model, QStandardItemModel):
+            return True
+
+        if self._text:
+            name_item = model.item(source_row, COL_NAME)
+            if not name_item or self._text not in name_item.text().lower():
+                return False
+
+        date_item = model.item(source_row, COL_CREATED)
+        if date_item:
+            try:
+                row_dt = datetime.strptime(date_item.text(), "%d.%m.%Y %H:%M")
+                row_qdate = QDate(row_dt.year, row_dt.month, row_dt.day)
+                if not (self._date_from <= row_qdate <= self._date_to):
+                    return False
+            except ValueError:
+                pass
+
+        return True
 
 
 class TaskListView(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, dark_mode: bool = True, parent=None):
         super().__init__(parent)
         self._app = None   # set by app.py
+        self._dark_mode = dark_mode
+        self._task_row_index: dict[int, int] = {}
         self._build_ui()
         self.refresh()
 
     def set_app(self, app):
         self._app = app
+
+    def theme_toggle(self) -> ThemeToggle:
+        return self._theme_btn
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -50,17 +143,30 @@ class TaskListView(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(16)
 
-        # Header
-        header = QHBoxLayout()
-        lbl = QLabel("🔗  Проверка обратных ссылок")
-        lbl.setObjectName("heading")
-        header.addWidget(lbl)
-        header.addStretch()
+        # Action bar: tg btn (left) — stretch — create btn + toggle (right)
+        action_bar = QHBoxLayout()
+        tg_btn = QPushButton("Поддержка и обновления")
+        tg_btn.setObjectName("btnTelegram")
+        tg_btn.setFixedHeight(30)
+        tg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        tg_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://t.me/akulov_pro"))
+        )
+        action_bar.addWidget(tg_btn)
+        action_bar.addStretch()
         btn_create = QPushButton("+ Создать задание")
         btn_create.setObjectName("btnCreate")
         btn_create.clicked.connect(self._go_create)
-        header.addWidget(btn_create)
-        root.addLayout(header)
+        action_bar.addWidget(btn_create)
+        action_bar.addSpacing(12)
+        self._theme_btn = ThemeToggle(self._dark_mode)
+        action_bar.addWidget(self._theme_btn)
+        root.addLayout(action_bar)
+
+        # Heading
+        lbl = QLabel("Проверка обратных ссылок")
+        lbl.setObjectName("heading")
+        root.addWidget(lbl)
 
         # Filters
         filter_bar = QHBoxLayout()
@@ -75,6 +181,7 @@ class TaskListView(QWidget):
         self._date_from.setSpecialValueText("Дата начала")
         self._date_from.setDate(QDate(2000, 1, 1))
         self._date_from.dateChanged.connect(self._apply_filter)
+        _configure_calendar(self._date_from)
         filter_bar.addWidget(QLabel("от"), 0)
         filter_bar.addWidget(self._date_from, 1)
 
@@ -83,6 +190,7 @@ class TaskListView(QWidget):
         self._date_to.setCalendarPopup(True)
         self._date_to.setDate(QDate.currentDate())
         self._date_to.dateChanged.connect(self._apply_filter)
+        _configure_calendar(self._date_to)
         filter_bar.addWidget(QLabel("до"), 0)
         filter_bar.addWidget(self._date_to, 1)
 
@@ -94,10 +202,8 @@ class TaskListView(QWidget):
             ["СОЗДАНО", "НАЗВАНИЕ", "ДОНОРОВ", "БЕКЛИНКОВ", "СТАТУС", "ДЕЙСТВИЯ"]
         )
 
-        self._proxy = QSortFilterProxyModel(self)
+        self._proxy = _TaskFilterProxy(self)
         self._proxy.setSourceModel(self._model)
-        self._proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._proxy.setFilterKeyColumn(COL_NAME)
 
         self._table = QTableView()
         self._table.setModel(self._proxy)
@@ -111,16 +217,29 @@ class TaskListView(QWidget):
         self._table.doubleClicked.connect(self._on_row_double_click)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
-        root.addWidget(self._table)
+        self._progress_delegate = _ProgressDelegate(self._table)
+        self._table.setItemDelegateForColumn(COL_STATUS, self._progress_delegate)
+        self._table.clicked.connect(self._on_cell_clicked)
+
+        self._empty_lbl = QLabel("Нет заданий\n\nНажмите «+ Создать задание», чтобы начать")
+        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_lbl.setObjectName("secondary")
+
+        self._content_stack = QStackedWidget()
+        self._content_stack.addWidget(self._empty_lbl)  # 0
+        self._content_stack.addWidget(self._table)       # 1
+        self._content_stack.setCurrentIndex(1)
+        root.addWidget(self._content_stack)
 
     # ── Data ──────────────────────────────────────────────────────────────
 
     def refresh(self):
         self._model.removeRows(0, self._model.rowCount())
-        tasks = db.get_all_tasks()
-        for task in tasks:
-            donor_count = db.count_task_donors(task["id"])
-            backlink_count = db.count_task_backlinks(task["id"])
+        self._task_row_index = {}
+        tasks = db.get_all_tasks_with_counts()   # single JOIN query — no N+1
+        for i, task in enumerate(tasks):
+            donor_count = task["donor_count"]
+            backlink_count = task["backlink_count"]
             status = task["status"]
             progress = task["progress"]
 
@@ -143,64 +262,51 @@ class TaskListView(QWidget):
                 QStandardItem(status_label),
                 QStandardItem("⋮"),
             ]
-            # store task_id in first column
+            # task_id stored on col-0 UserRole; progress on COL_STATUS UserRole
             items[0].setData(task["id"], Qt.ItemDataRole.UserRole)
+            items[COL_STATUS].setData(
+                progress if status == "running" else None, _PROGRESS_ROLE
+            )
             color = QColor(STATUS_COLORS.get(status, "#888888"))
             items[COL_STATUS].setForeground(color)
             items[5].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             self._model.appendRow(items)
+            self._task_row_index[task["id"]] = i
+
+        self._content_stack.setCurrentIndex(0 if not tasks else 1)
 
     def update_task_row(self, task_id: int):
         """Refresh a single row after worker emits progress."""
-        for row in range(self._model.rowCount()):
-            item = self._model.item(row, 0)
-            if item and item.data(Qt.ItemDataRole.UserRole) == task_id:
-                task = db.get_task(task_id)
-                if not task:
-                    return
-                status = task["status"]
-                progress = task["progress"]
-                status_label = STATUS_LABELS.get(status, status)
-                if status == "running" and progress > 0:
-                    status_label = f"🔄 В процессе ({progress}%)"
-                self._model.item(row, COL_STATUS).setText(status_label)
-                self._model.item(row, COL_STATUS).setForeground(
-                    QColor(STATUS_COLORS.get(status, "#888888"))
-                )
-                bl = db.count_task_backlinks(task_id)
-                self._model.item(row, COL_BACKLINKS).setText(str(bl))
-                return
+        row = self._task_row_index.get(task_id)
+        if row is None:
+            return
+        task = db.get_task(task_id)
+        if not task:
+            return
+        status = task["status"]
+        progress = task["progress"]
+        status_label = STATUS_LABELS.get(status, status)
+        if status == "running" and progress > 0:
+            status_label = f"🔄 В процессе ({progress}%)"
+        self._model.item(row, COL_STATUS).setText(status_label)
+        self._model.item(row, COL_STATUS).setForeground(
+            QColor(STATUS_COLORS.get(status, "#888888"))
+        )
+        self._model.item(row, COL_STATUS).setData(
+            progress if status == "running" else None, _PROGRESS_ROLE
+        )
+        bl = db.count_task_backlinks(task_id)
+        self._model.item(row, COL_BACKLINKS).setText(str(bl))
 
     # ── Filtering ─────────────────────────────────────────────────────────
 
     def _apply_filter(self):
-        text = self._search.text().lower()
-        date_from = self._date_from.date()
-        date_to = self._date_to.date()
-
-        for row in range(self._model.rowCount()):
-            # Text filter on name (col 1)
-            name_item = self._model.item(row, COL_NAME)
-            name_match = not text or (name_item and text in name_item.text().lower())
-
-            # Date filter on created_at (col 0)
-            date_item = self._model.item(row, COL_CREATED)
-            date_match = True
-            if date_item:
-                try:
-                    row_dt = datetime.strptime(date_item.text(), "%d.%m.%Y %H:%M")
-                    row_qdate = QDate(row_dt.year, row_dt.month, row_dt.day)
-                    date_match = date_from <= row_qdate <= date_to
-                except ValueError:
-                    date_match = True
-
-            proxy_row = self._proxy.mapFromSource(self._model.index(row, 0)).row()
-            if proxy_row >= 0:
-                self._table.setRowHidden(proxy_row, not (name_match and date_match))
-
-        # Also apply text filter to proxy model (keeps sorting working)
-        self._proxy.setFilterFixedString("")  # reset proxy; row hiding is manual above
+        self._proxy.set_filters(
+            self._search.text(),
+            self._date_from.date(),
+            self._date_to.date(),
+        )
 
     # ── Navigation ────────────────────────────────────────────────────────
 
@@ -209,7 +315,13 @@ class TaskListView(QWidget):
         item = self._model.item(source_row, 0)
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
+    def _on_cell_clicked(self, index):
+        if index.column() == 5:
+            self._show_context_menu(self._table.visualRect(index).center())
+
     def _on_row_double_click(self, index):
+        if index.column() == 5:
+            return
         task_id = self._get_task_id_for_proxy_row(index.row())
         if task_id and self._app:
             self._app.show_report(task_id)
@@ -229,28 +341,25 @@ class TaskListView(QWidget):
             return
 
         menu = QMenu(self)
-        act_retry  = menu.addAction("Повторить проверку")
-        act_export = menu.addAction("Экспортировать в .xlsx")
+        act_retry        = menu.addAction("Повторить проверку")
+        act_retry_failed = menu.addAction("Повторить неудачные")
+        act_clone        = menu.addAction("Дублировать задание")
+        act_export       = menu.addAction("Экспортировать в .xlsx")
         menu.addSeparator()
         act_delete = menu.addAction("Удалить задание")
 
         action = menu.exec(self._table.viewport().mapToGlobal(pos))
         if action == act_retry and self._app:
             self._app.retry_task(task_id)
+        elif action == act_retry_failed and self._app:
+            self._app.retry_failed_task(task_id)
+        elif action == act_clone and self._app:
+            self._app.clone_task(task_id)
         elif action == act_export and self._app:
             self._app.export_task(task_id)
         elif action == act_delete and self._app:
             self._confirm_delete(task_id)
 
     def _confirm_delete(self, task_id: int) -> None:
-        task = db.get_task(task_id)
-        name = task["name"] if task else f"#{task_id}"
-        reply = QMessageBox.question(
-            self,
-            "Удалить задание",
-            f"Удалить задание «{name}»?\n\nВсе доноры и бэклинки будут удалены безвозвратно.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self._app.delete_task(task_id)  # type: ignore[union-attr]
+        if self._app:
+            self._app.confirm_and_delete_task(task_id, self)

@@ -7,14 +7,45 @@ import asyncio
 import logging
 from typing import Callable
 
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout, Error as PWError
+from playwright.async_api import Error as PWError
+from playwright.async_api import TimeoutError as PWTimeout
+from playwright.async_api import async_playwright
 
+from core.indexability import check_indexability
 from core.models import CheckConfig, DonorResult
 from core.parser import parse_page
-from core.indexability import check_indexability
 from utils.user_agents import get_profile
 
 logger = logging.getLogger(__name__)
+
+
+_INFINITE_SCROLL_GROWTH = 1.30  # page grew >30 % → likely infinite pagination
+
+
+async def _scroll_for_lazy_content(page) -> None:
+    """Trigger lazy-loaded content by scrolling down.
+
+    Performs up to two scroll passes.  Aborts after the first pass if the page
+    height grows by more than 30 % — a reliable sign of infinite-scroll
+    pagination where further scrolling would keep adding new posts indefinitely.
+    """
+    try:
+        prev_h: int = await page.evaluate("document.body.scrollHeight")
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(0.8)
+
+        new_h: int = await page.evaluate("document.body.scrollHeight")
+        if new_h >= prev_h * _INFINITE_SCROLL_GROWTH:
+            # Infinite scroll detected — one pass is enough, stop here
+            return
+
+        # Second pass: stable page, trigger any remaining lazy observers
+        if new_h > prev_h:
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.5)
+
+    except Exception:  # nosec B110
+        pass  # non-critical — JS errors on exotic pages must not break checking
 
 
 async def _check_one(
@@ -25,11 +56,12 @@ async def _check_one(
 ) -> DonorResult:
     result = DonorResult(donor_id=donor_id, url=url)
     response_headers: dict = {}
+    final_url: str = url
 
     try:
         response = await page.goto(
             url,
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
             timeout=config.timeout * 1000,
         )
 
@@ -51,7 +83,9 @@ async def _check_one(
             result.error_code = f"HTTP_{result.http_status}"
             return result
 
+        await _scroll_for_lazy_content(page)
         html = await page.content()
+        final_url = page.url  # may differ from url after HTTP redirects
 
     except PWTimeout:
         result.status = "not_loaded"
@@ -75,7 +109,7 @@ async def _check_one(
 
     # ── Parse ──────────────────────────────────────────────────────────────
     try:
-        parsed = parse_page(html, url, config.target_domains)
+        parsed = parse_page(html, final_url, config.target_domains)
         result.title = parsed["title"]
         result.canonical_url = parsed["canonical_url"]
         result.internal_links = parsed["internal_links"]
@@ -124,17 +158,26 @@ async def run_check(
             async with semaphore:
                 if stop_event.is_set():
                     return
-                context = await browser.new_context(
-                    user_agent=profile.user_agent,
-                    viewport={"width": profile.viewport_width, "height": profile.viewport_height},
-                    is_mobile=profile.is_mobile,
-                )
-                page = await context.new_page()
                 try:
-                    donor_result = await _check_one(page, donor_id, url, config)
-                finally:
-                    await page.close()
-                    await context.close()
+                    context = await browser.new_context(
+                        user_agent=profile.user_agent,
+                        viewport={"width": profile.viewport_width, "height": profile.viewport_height},
+                        is_mobile=profile.is_mobile,
+                    )
+                    try:
+                        page = await context.new_page()
+                        try:
+                            donor_result = await _check_one(page, donor_id, url, config)
+                        finally:
+                            await page.close()
+                    finally:
+                        await context.close()
+                except Exception as exc:
+                    logger.exception("Context/page error for %s: %s", url, exc)
+                    donor_result = DonorResult(
+                        donor_id=donor_id, url=url,
+                        status="not_loaded", error_code="UNKNOWN",
+                    )
 
                 try:
                     result_callback(donor_result)
@@ -158,7 +201,13 @@ async def run_check(
         except asyncio.CancelledError:
             for t in tasks:
                 t.cancel()
+            # Wait for tasks to finish before closing the browser;
+            # otherwise pages in flight get a PWError mid-navigation.
+            await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception as exc:
+                logger.exception("Error closing browser: %s", exc)
 
     logger.info("Check complete: %d/%d", done_count, total)

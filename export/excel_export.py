@@ -4,13 +4,15 @@ Export task results to Excel (.xlsx) with 4 sheets.
 
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from db import database as db
+from utils.url_utils import get_domain, matches_target, normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,7 @@ def _auto_width(ws, min_w=10, max_w=60):
             try:
                 if cell.value:
                     max_len = max(max_len, len(str(cell.value)))
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         ws.column_dimensions[col_letter].width = min(max(max_len + 2, min_w), max_w)
 
@@ -134,7 +136,8 @@ def _sheet_donors(wb, donors, backlinks):
     headers = [
         "URL донора", "HTTP статус", "Title", "Canonical",
         "Внутр. ссылок", "Внешн. ссылок",
-        "Индекс Google", "Индекс Yandex", "Найдено бэклинков"
+        "Индекс Google", "Индекс Yandex", "Индекс Bing", "Индекс Baidu",
+        "Найдено бэклинков"
     ]
     _write_headers(ws, headers)
 
@@ -153,6 +156,8 @@ def _sheet_donors(wb, donors, backlinks):
             donor["external_links"] or 0,
             donor["index_google"] or "—",
             donor["index_yandex"] or "—",
+            donor["index_bing"] or "—",
+            donor["index_baidu"] or "—",
             bl_counts.get(donor["id"], 0),
         ]
         _write_row(ws, row_idx, values)
@@ -187,17 +192,44 @@ def _sheet_backlinks(wb, backlinks, donor_map: dict):
     _auto_width(ws)
 
 
+def _sheet_domains(wb, backlinks, target_domains):
+    """One row per target domain: found/not-found with backlink and donor counts."""
+    ws = wb.create_sheet("По доменам")
+    _write_headers(ws, [
+        "Целевой домен", "Доноров", "Бэклинков", "Dofollow", "Nofollow", "Статус"
+    ])
+
+    for row_idx, orig in enumerate(target_domains, 2):
+        norm = normalize_domain(orig)
+        matched = [
+            bl for bl in backlinks
+            if matches_target(bl["target_url"] or "", norm)
+        ]
+        donors = len({bl["donor_id"] for bl in matched})
+        df = sum(1 for bl in matched if bl["rel_type"] == "dofollow")
+        nf = len(matched) - df
+        found = len(matched) > 0
+
+        _write_row(ws, row_idx, [orig, donors, len(matched), df, nf,
+                                  "Найден" if found else "Не найден"])
+        ws.cell(row=row_idx, column=6).fill = PatternFill(
+            "solid", fgColor=CLR_GREEN if found else CLR_RED
+        )
+
+    _auto_width(ws)
+
+
 def _sheet_anchors(wb, anchor_stats):
     ws = wb.create_sheet("Топ анкоры")
-    _write_headers(ws, ["Анкор", "Количество", "% от общего"])
+    _write_headers(ws, ["Анкор", "Ссылки", "Домены", "Dofollow / Nofollow", "% от общего"])
 
-    total = sum(r["cnt"] for r in anchor_stats) or 1
     for row_idx, row in enumerate(anchor_stats, 2):
-        pct = f"{row['cnt'] / total * 100:.1f}%"
         _write_row(ws, row_idx, [
             row["anchor_text"] or "(пусто)",
             row["cnt"],
-            pct,
+            row["domains"],
+            f"{row['dofollow']} / {row['nofollow']}",
+            f"{row['pct']:.1f}%",
         ])
 
     _auto_width(ws)
@@ -210,17 +242,43 @@ def export_to_excel(task_id: int, output_path: str) -> None:
     if not task:
         raise ValueError(f"Task {task_id} not found")
 
-    target_domains = json.loads(task["target_domains"])
+    try:
+        target_domains = json.loads(task["target_domains"])
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.error("Corrupted target_domains for task %d: %s", task_id, exc)
+        raise ValueError(f"Task {task_id} has corrupted target_domains") from exc
     donors = db.get_donors_for_task(task_id)
     backlinks = db.get_backlinks_for_task(task_id)
-    anchor_stats = db.get_anchor_stats(task_id)
 
     donor_map = {d["id"]: d["url"] for d in donors}
+
+    # Rich anchor stats — same logic as report_view for consistency
+    _anchor_groups: dict[str, list] = defaultdict(list)
+    for _bl in backlinks:
+        _anchor_groups[_bl["anchor_text"] or ""].append(_bl)
+    _total_bl = len(backlinks)
+    anchor_stats = []
+    for _anchor, _bls in sorted(_anchor_groups.items(), key=lambda x: -len(x[1])):
+        _df = sum(1 for b in _bls if b["rel_type"] == "dofollow")
+        _domains = len({
+            get_domain(donor_map.get(b["donor_id"], ""))
+            for b in _bls
+            if donor_map.get(b["donor_id"])
+        })
+        anchor_stats.append({
+            "anchor_text": _anchor,
+            "cnt":         len(_bls),
+            "domains":     _domains,
+            "dofollow":    _df,
+            "nofollow":    len(_bls) - _df,
+            "pct":         len(_bls) / _total_bl * 100 if _total_bl > 0 else 0.0,
+        })
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # remove default sheet
 
     _sheet_summary(wb, task, target_domains, donors, backlinks)
+    _sheet_domains(wb, backlinks, target_domains)
     _sheet_donors(wb, donors, backlinks)
     _sheet_backlinks(wb, backlinks, donor_map)
     _sheet_anchors(wb, anchor_stats)

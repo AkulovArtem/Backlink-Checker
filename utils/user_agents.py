@@ -15,7 +15,7 @@ PROFILES: dict[str, UAProfile] = {
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "Chrome/147.0.0.0 Safari/537.36"
         ),
         is_mobile=False,
         viewport_width=1920,
@@ -24,24 +24,24 @@ PROFILES: dict[str, UAProfile] = {
     "mobile_chrome": UAProfile(
         label="Mobile Chrome (Android)",
         user_agent=(
-            "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
+            "Mozilla/5.0 (Linux; Android 15; Pixel 9) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.6367.82 Mobile Safari/537.36"
+            "Chrome/147.0.7683.64 Mobile Safari/537.36"
         ),
         is_mobile=True,
-        viewport_width=375,
-        viewport_height=812,
+        viewport_width=393,
+        viewport_height=852,
     ),
     "mobile_safari": UAProfile(
         label="Mobile Safari (iPhone)",
         user_agent=(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 26_4_2 like Mac OS X) "
             "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-            "Version/17.4.1 Mobile/15E148 Safari/604.1"
+            "Version/26.4.2 Mobile/15E148 Safari/604.1"
         ),
         is_mobile=True,
-        viewport_width=375,
-        viewport_height=812,
+        viewport_width=393,
+        viewport_height=852,
     ),
     "custom": UAProfile(
         label="Custom",

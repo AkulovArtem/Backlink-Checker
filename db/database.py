@@ -1,6 +1,6 @@
-import sqlite3
 import json
 import logging
+import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -68,6 +68,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS backlinks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 donor_id INTEGER NOT NULL,
+                -- task_id is denormalised here for O(1) task-level backlink queries
+                -- without a JOIN through donors; removing it would require a schema migration.
                 task_id INTEGER NOT NULL,
                 target_url TEXT NOT NULL,
                 anchor_text TEXT,
@@ -108,11 +110,20 @@ def create_task(name: str, target_domains: list[str], user_agent: str = "desktop
         return cur.lastrowid or 0
 
 
-def get_all_tasks() -> list[sqlite3.Row]:
+def get_all_tasks_with_counts() -> list[sqlite3.Row]:
+    """Single-query alternative to get_all_tasks() + per-task count calls.
+
+    Returns all task columns plus donor_count and backlink_count so callers
+    don't need to issue two extra SELECT COUNT queries per row (N+1 problem).
+    """
     with get_connection() as conn:
-        return conn.execute(
-            "SELECT * FROM tasks ORDER BY created_at DESC"
-        ).fetchall()
+        return conn.execute("""
+            SELECT t.*,
+                   (SELECT COUNT(*) FROM donors    d WHERE d.task_id = t.id) AS donor_count,
+                   (SELECT COUNT(*) FROM backlinks b WHERE b.task_id = t.id) AS backlink_count
+            FROM   tasks t
+            ORDER BY t.created_at DESC
+        """).fetchall()
 
 
 def get_task(task_id: int) -> Optional[sqlite3.Row]:
@@ -187,6 +198,30 @@ def get_donors_for_task(task_id: int) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def get_failed_donors_for_task(task_id: int) -> list[sqlite3.Row]:
+    """Return only donors whose last fetch failed (status = 'not_loaded')."""
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM donors WHERE task_id = ? AND status = 'not_loaded' ORDER BY id",
+            (task_id,),
+        ).fetchall()
+
+
+def reset_failed_donors(task_id: int) -> None:
+    """Reset only not_loaded donors to pending; leaves found/not_found rows intact."""
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE donors SET
+               status = 'pending', http_status = NULL, title = NULL,
+               canonical_url = NULL, internal_links = 0, external_links = 0,
+               index_google = NULL, index_yandex = NULL, index_bing = NULL,
+               index_baidu = NULL, meta_robots = NULL, x_robots_tag = NULL,
+               error_code = NULL, html_snippet = NULL
+               WHERE task_id = ? AND status = 'not_loaded'""",
+            (task_id,),
+        )
+
+
 _DONOR_COLUMNS = frozenset({
     "http_status", "title", "canonical_url", "internal_links", "external_links",
     "index_google", "index_yandex", "index_bing", "index_baidu",
@@ -219,18 +254,6 @@ def get_donor_stats(task_id: int) -> dict:
 
 
 # ── Backlinks ──────────────────────────────────────────────────────────────
-
-def create_backlink(donor_id: int, task_id: int, target_url: str,
-                    anchor_text: str, anchor_type: str, rel_type: str,
-                    context_html: str) -> None:
-    with get_connection() as conn:
-        conn.execute(
-            """INSERT INTO backlinks
-               (donor_id, task_id, target_url, anchor_text, anchor_type, rel_type, context_html)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (donor_id, task_id, target_url, anchor_text, anchor_type, rel_type, context_html)
-        )
-
 
 def create_backlinks_bulk(donor_id: int, task_id: int, backlinks: list) -> None:
     """Insert all backlinks for one donor in a single transaction."""
