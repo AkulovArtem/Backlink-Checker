@@ -2,18 +2,30 @@
 Screen 2: Create task form.
 """
 
-import re
+import json
 import logging
+import re
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QPlainTextEdit, QSpinBox, QComboBox, QFileDialog,
-    QFrame, QScrollArea, QGroupBox,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
 from db import database as db
+from gui.icons import OrDivider
 from utils.user_agents import PROFILES
 
 logger = logging.getLogger(__name__)
@@ -26,7 +38,8 @@ def _circle_label(n: str) -> QLabel:
     lbl.setFixedSize(28, 28)
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lbl.setStyleSheet(
-        "background-color: #00c853; color: #fff; border-radius: 14px; font-weight: bold;"
+        "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #34AADC, stop:1 #007AFF);"
+        "color: #fff; border-radius: 14px; font-weight: bold;"
     )
     return lbl
 
@@ -35,6 +48,7 @@ class TaskCreateView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._app = None
+        self._skip_confirmed = False
         self._build_ui()
 
     def set_app(self, app):
@@ -80,21 +94,14 @@ class TaskCreateView(QWidget):
             "https://example.com/products/item-123\nhttps://test-site.org/blog/article-title\n..."
         )
         self._donors_edit.setFixedHeight(140)
+        self._donors_edit.textChanged.connect(self._on_donors_changed)
         root.addWidget(self._donors_edit)
 
         hint1 = QLabel("Введите ссылки, разделяя их переносами строк  •  До 100 000 ссылок")
         hint1.setObjectName("secondary")
         root.addWidget(hint1)
 
-        or_row = QHBoxLayout()
-        line_l = QFrame()
-        line_l.setFrameShape(QFrame.Shape.HLine)
-        line_r = QFrame()
-        line_r.setFrameShape(QFrame.Shape.HLine)
-        or_row.addWidget(line_l)
-        or_row.addWidget(QLabel("или"))
-        or_row.addWidget(line_r)
-        root.addLayout(or_row)
+        root.addWidget(OrDivider())
 
         file_row = QHBoxLayout()
         self._file_btn = QPushButton("Выберите файл (.txt)")
@@ -166,6 +173,13 @@ class TaskCreateView(QWidget):
         self._error_lbl.setVisible(False)
         root.addWidget(self._error_lbl)
 
+        # Skipped-URL warning label (shown when some URLs lack http/https)
+        self._warn_lbl = QLabel("")
+        self._warn_lbl.setStyleSheet("color: #ffa726;")
+        self._warn_lbl.setWordWrap(True)
+        self._warn_lbl.setVisible(False)
+        root.addWidget(self._warn_lbl)
+
         # Create button
         btn_create = QPushButton("Создать")
         btn_create.setObjectName("btnCreate")
@@ -188,6 +202,12 @@ class TaskCreateView(QWidget):
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
+    def _on_donors_changed(self):
+        """Reset skip-confirmation so the warning re-appears if the text changes."""
+        if self._skip_confirmed:
+            self._skip_confirmed = False
+            self._warn_lbl.setVisible(False)
+
     def _on_ua_changed(self):
         is_custom = self._ua_combo.currentData() == "custom"
         self._custom_ua_edit.setVisible(is_custom)
@@ -206,6 +226,7 @@ class TaskCreateView(QWidget):
 
     def _submit(self):
         self._error_lbl.setVisible(False)
+        self._warn_lbl.setVisible(False)
 
         name = self._name_edit.text().strip() or "Задание"
 
@@ -214,6 +235,7 @@ class TaskCreateView(QWidget):
             u.strip() for u in self._donors_edit.toPlainText().splitlines()
             if u.strip()
         ]
+        invalid_count = sum(1 for u in raw_donors if not URL_RE.match(u))
         valid_donors = list(dict.fromkeys(
             u for u in raw_donors if URL_RE.match(u)
         ))[:100_000]
@@ -242,6 +264,19 @@ class TaskCreateView(QWidget):
             self._error_lbl.setText("Введите строку User-Agent для режима «Custom».")
             self._error_lbl.setVisible(True)
             return
+
+        # Warn about skipped URLs; require a second click to confirm
+        if invalid_count > 0 and not self._skip_confirmed:
+            self._warn_lbl.setText(
+                f"⚠  {invalid_count} URL пропущено — нет схемы http:// или https://. "
+                f"Задание будет создано с {len(valid_donors)} донором(ами). "
+                "Нажмите «Создать» ещё раз для подтверждения."
+            )
+            self._warn_lbl.setVisible(True)
+            self._skip_confirmed = True
+            return
+
+        self._skip_confirmed = False
 
         threads = self._threads_spin.value()
         timeout = self._timeout_spin.value()
@@ -279,3 +314,22 @@ class TaskCreateView(QWidget):
         self._threads_spin.setValue(5)
         self._timeout_spin.setValue(30)
         self._error_lbl.setVisible(False)
+        self._warn_lbl.setVisible(False)
+        self._skip_confirmed = False
+
+    def prefill(self, task, donors: list) -> None:
+        """Pre-fill the form with data from an existing task for cloning."""
+        self._name_edit.setText(f"{task['name']} (копия)")
+        self._donors_edit.setPlainText("\n".join(d["url"] for d in donors))
+        targets = json.loads(task["target_domains"])
+        self._targets_edit.setPlainText("\n".join(targets))
+        ua = task["user_agent"] or "desktop_chrome"
+        for i in range(self._ua_combo.count()):
+            if self._ua_combo.itemData(i) == ua:
+                self._ua_combo.setCurrentIndex(i)
+                break
+        custom = task["custom_user_agent"] or ""
+        if custom:
+            self._custom_ua_edit.setText(custom)
+        self._threads_spin.setValue(task["threads"])
+        self._timeout_spin.setValue(task["timeout"])

@@ -6,26 +6,55 @@ import json
 import logging
 from collections import defaultdict
 from datetime import datetime
-from urllib.parse import urlparse
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QRectF, Qt, QUrl
+from PyQt6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QPainter,
+    QPainterPath,
+    QPalette,
+)
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QTabWidget, QLineEdit, QProgressBar, QScrollArea, QMenu,
-    QAbstractItemView, QMessageBox,
+    QAbstractItemView,
+    QApplication,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
 from db import database as db
+from gui.constants import STATUS_LABELS
+from utils.url_utils import get_domain, matches_target, normalize_domain
+
+
+def _clipboard_set(text: str) -> None:
+    """Copy text to system clipboard; guards against clipboard() returning None."""
+    cb = QApplication.clipboard()
+    if cb is not None:
+        cb.setText(text)
 
 logger = logging.getLogger(__name__)
 
-STATUS_LABELS = {
-    "pending":    "⏳ В очереди",
-    "running":    "🔄 В процессе",
-    "completed":  "✅ Завершено",
-    "error":      "❌ Ошибка",
+_SE_INDEX_COL = {
+    "google": "index_google",
+    "yandex": "index_yandex",
+    "bing":   "index_bing",
+    "baidu":  "index_baidu",
 }
 
 REL_COLORS = {
@@ -51,10 +80,64 @@ def _secondary(text: str) -> QLabel:
 def _badge(text: str, color: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(
-        f"background-color: {color}22; color: {color}; border: 1px solid {color};"
-        "border-radius: 4px; padding: 1px 6px; font-size: 11px;"
+        f"background-color: {color}18; color: {color};"
+        "border: none; border-radius: 10px;"
+        "padding: 2px 10px; font-size: 11px; font-weight: 600;"
     )
     return lbl
+
+
+class _SegBar(QWidget):
+    """Segmented bar — fills proportionally with per-segment colours.
+
+    Pass `total` to anchor proportions to a fixed denominator (e.g. total
+    donors) so that unchecked/pending items show as the unfilled background
+    instead of being excluded from the ratio.
+    """
+
+    def __init__(self, segments: list[tuple[int, str]],
+                 total: int | None = None, parent=None):
+        super().__init__(parent)
+        self._segments = segments
+        self._total = total
+        self.setFixedHeight(8)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_segments(self, segments: list[tuple[int, str]],
+                     total: int | None = None) -> None:
+        self._segments = segments
+        if total is not None:
+            self._total = total
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        W, H = float(self.width()), float(self.height())
+        r = H / 2
+        full = QRectF(0.0, 0.0, W, H)
+        total = (self._total if self._total is not None
+                 else sum(v for v, _ in self._segments if v > 0))
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self.palette().color(QPalette.ColorRole.AlternateBase))
+        p.drawRoundedRect(full, r, r)
+
+        if total > 0:
+            clip = QPainterPath()
+            clip.addRoundedRect(full, r, r)
+            p.setClipPath(clip)
+            x = 0.0
+            for val, color in self._segments:
+                if val <= 0:
+                    continue
+                seg_w = W * val / total
+                p.setBrush(QColor(color))
+                p.drawRect(QRectF(x, 0.0, seg_w, H))
+                x += seg_w
+
+        p.end()
 
 
 def _card(title: str, value: str, subtitle: str = "") -> QFrame:
@@ -62,12 +145,14 @@ def _card(title: str, value: str, subtitle: str = "") -> QFrame:
     frame.setObjectName("card")
     frame.setMinimumWidth(160)
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setContentsMargins(16, 14, 16, 14)
+    layout.setSpacing(6)
     t = QLabel(title)
     t.setObjectName("secondary")
     layout.addWidget(t)
     v = QLabel(value)
-    v.setStyleSheet("font-size: 18px; font-weight: bold;")
+    v.setStyleSheet("font-size: 20px; font-weight: 700;")
+    v.setWordWrap(True)
     layout.addWidget(v)
     if subtitle:
         s = QLabel(subtitle)
@@ -88,6 +173,9 @@ class ReportView(QWidget):
         self._donors_cache: list = []
         self._backlinks_cache: list = []
         self._bl_donor_map_cache: dict = {}
+        self._type_btns: dict[str, QPushButton] = {}
+        self._index_btns: dict[str, QPushButton] = {}
+        self._status_btns: dict[str, QPushButton] = {}
         self._build_ui()
 
     def set_app(self, app):
@@ -104,6 +192,7 @@ class ReportView(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         self._container = QWidget()
+        self._container.setMinimumWidth(800)
         self._root = QVBoxLayout(self._container)
         self._root.setContentsMargins(24, 24, 24, 24)
         self._root.setSpacing(16)
@@ -118,10 +207,14 @@ class ReportView(QWidget):
             return
         while layout.count():
             child = layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-            elif child.layout():
-                ReportView._delete_layout(child.layout())
+            w = child.widget()
+            if w is not None:
+                w.deleteLater()
+            else:
+                sub = child.layout()
+                if sub is not None:
+                    ReportView._delete_layout(sub)
+            # QSpacerItem: Python GC handles cleanup when child goes out of scope
 
     def _clear(self):
         self._delete_layout(self._root)
@@ -130,6 +223,7 @@ class ReportView(QWidget):
 
     def load_task(self, task_id: int):
         self._task_id = task_id
+        _active_tab = self._data_tabs.currentIndex() if hasattr(self, "_data_tabs") else 0
         self._clear()
 
         task = db.get_task(task_id)
@@ -154,7 +248,7 @@ class ReportView(QWidget):
         for _anchor, _bls in sorted(_anchor_groups.items(), key=lambda x: -len(x[1])):
             _df = sum(1 for b in _bls if b["rel_type"] == "dofollow")
             _domains = len({
-                urlparse(donor_map.get(b["donor_id"], "")).netloc.lower().lstrip("www.")
+                get_domain(donor_map.get(b["donor_id"], ""))
                 for b in _bls
                 if donor_map.get(b["donor_id"])
             })
@@ -178,12 +272,9 @@ class ReportView(QWidget):
         text_count = sum(1 for bl in backlinks if bl["anchor_type"] == "text")
         img_count = len(backlinks) - text_count
 
-        _idx_col = {
-            "google": "index_google", "yandex": "index_yandex",
-            "bing": "index_bing", "baidu": "index_baidu",
-        }.get(self._current_se, "index_google")
-        open_count = sum(1 for d in donors if d[_idx_col] == "open")
-        closed_count = total_donors - open_count
+        _idx_col = _SE_INDEX_COL.get(self._current_se, "index_google")
+        open_count  = sum(1 for d in donors if d[_idx_col] == "open")
+        closed_count = sum(1 for d in donors if d[_idx_col] == "closed")
 
         # ── Header ────────────────────────────────────────────────────────
         header_row = QHBoxLayout()
@@ -194,7 +285,7 @@ class ReportView(QWidget):
         title_lbl = QLabel(task["name"].upper())
         title_lbl.setObjectName("heading")
         header_row.addWidget(title_lbl)
-        header_row.addWidget(_badge("Проверка обратных ссылок", "#ff8f00"))
+        header_row.addWidget(_badge("Проверка обратных ссылок", "#007AFF"))
 
         status = task["status"]
         status_color = {"completed": "#00c853", "error": "#ff5252", "running": "#ffa726"}.get(status, "#888")
@@ -224,16 +315,26 @@ class ReportView(QWidget):
         status_card.setObjectName("card")
         status_card.setMinimumWidth(200)
         sc_layout = QVBoxLayout(status_card)
-        sc_layout.setContentsMargins(12, 10, 12, 10)
+        sc_layout.setContentsMargins(16, 14, 16, 14)
+        sc_layout.setSpacing(6)
         sc_layout.addWidget(_secondary("СТАТУС ДОНОРОВ"))
-        nums = QLabel(f"✅ {found}  🔍 {not_found}  ❌ {not_loaded}")
-        nums.setStyleSheet("font-weight: bold;")
+        nums = QLabel(
+            f'<span style="color:#00c853"><b>{found}</b></span>'
+            f' / <span style="color:#ffa726"><b>{not_found}</b></span>'
+            f' / <span style="color:#ff5252"><b>{not_loaded}</b></span>'
+        )
+        nums.setStyleSheet("font-size: 16px;")
         sc_layout.addWidget(nums)
-        bar = QProgressBar()
-        bar.setMaximum(max(total_donors, 1))
-        bar.setValue(found)
-        bar.setTextVisible(False)
-        sc_layout.addWidget(bar)
+        sc_layout.addWidget(_SegBar([
+            (found,       "#00c853"),
+            (not_found,   "#ffa726"),
+            (not_loaded,  "#ff5252"),
+        ], total=total_donors))
+        sc_layout.addWidget(QLabel(
+            '<span style="color:#00c853">■ Найдено</span>'
+            '  <span style="color:#ffa726">■ Не найдено</span>'
+            '  <span style="color:#ff5252">■ Ошибка</span>'
+        ))
 
         cards_row.addWidget(status_card)
         self._root.addLayout(cards_row)
@@ -275,40 +376,44 @@ class ReportView(QWidget):
             frame = QFrame()
             frame.setObjectName("card")
             fl = QVBoxLayout(frame)
-            fl.setContentsMargins(12, 10, 12, 10)
+            fl.setContentsMargins(16, 14, 16, 14)
+            fl.setSpacing(6)
             fl.addWidget(_secondary(title))
-            total = a_val + b_val
             nums_lbl = QLabel(f"{a_val} / {b_val}")
-            nums_lbl.setStyleSheet("font-size: 16px; font-weight: bold;")
+            nums_lbl.setStyleSheet("font-size: 20px; font-weight: 700;")
             fl.addWidget(nums_lbl)
-            bar2 = QProgressBar()
-            bar2.setMaximum(max(total, 1))
-            bar2.setValue(a_val)
-            bar2.setTextVisible(False)
-            bar2.setStyleSheet(
-                f"QProgressBar::chunk {{ background-color: {a_color}; }}"
+            fl.addWidget(_SegBar([(a_val, a_color), (b_val, b_color)]))
+            legend = QLabel(
+                f'<span style="color:{a_color}">■ {a_label}: {a_val}</span>'
+                f'  <span style="color:{b_color}">■ {b_label}: {b_val}</span>'
             )
-            fl.addWidget(bar2)
-            legend = QLabel(f"● {a_label}  ● {b_label}")
             legend.setObjectName("secondary")
             fl.addWidget(legend)
             return frame
 
         analytics_row.addWidget(_analytics_block(
             "DOFOLLOW / NOFOLLOW", df_count, nf_count,
-            "dofollow", "nofollow", "#00c853", "#ff5252"
+            "Dofollow", "Nofollow", "#007AFF", "#ff5252"
         ))
 
-        # Unique domains DF/NF
-        df_domains = len({
-            bl["target_url"].split("/")[2] for bl in backlinks if bl["rel_type"] == "dofollow"
-        })
-        nf_domains = len({
-            bl["target_url"].split("/")[2] for bl in backlinks if bl["rel_type"] != "dofollow"
-        })
+        # Unique donor domains split by whether they have ANY dofollow link.
+        # Sets are mutually exclusive: DF = at least one DF backlink,
+        # NF = backlinks exist but none are dofollow.
+        _all_bl_domains = {
+            get_domain(donor_map.get(bl["donor_id"], ""))
+            for bl in backlinks
+            if donor_map.get(bl["donor_id"])
+        }
+        _df_domain_set = {
+            get_domain(donor_map.get(bl["donor_id"], ""))
+            for bl in backlinks
+            if bl["rel_type"] == "dofollow" and donor_map.get(bl["donor_id"])
+        }
+        df_domains = len(_df_domain_set)
+        nf_domains = len(_all_bl_domains - _df_domain_set)
         analytics_row.addWidget(_analytics_block(
             "ССЫЛАЮЩИЕСЯ ДОМЕНЫ: DF / NF", df_domains, nf_domains,
-            "dofollow", "nofollow", "#00c853", "#ff5252"
+            "Dofollow", "Nofollow", "#007AFF", "#ff5252"
         ))
         analytics_row.addWidget(_analytics_block(
             "ТИПЫ АНКОРОВ", text_count, img_count,
@@ -318,28 +423,32 @@ class ReportView(QWidget):
         idx_frame = QFrame()
         idx_frame.setObjectName("card")
         idx_fl = QVBoxLayout(idx_frame)
-        idx_fl.setContentsMargins(12, 10, 12, 10)
+        idx_fl.setContentsMargins(16, 14, 16, 14)
+        idx_fl.setSpacing(6)
         idx_fl.addWidget(_secondary("ИНДЕКСИРУЕМОСТЬ"))
         self._idx_nums_lbl = QLabel(f"{open_count} / {closed_count}")
-        self._idx_nums_lbl.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self._idx_nums_lbl.setStyleSheet("font-size: 20px; font-weight: 700;")
         idx_fl.addWidget(self._idx_nums_lbl)
-        self._idx_bar = QProgressBar()
-        self._idx_bar.setMaximum(max(total_donors, 1))
-        self._idx_bar.setValue(open_count)
-        self._idx_bar.setTextVisible(False)
-        self._idx_bar.setStyleSheet(
-            "QProgressBar::chunk { background-color: #00c853; }"
+        self._idx_bar = _SegBar(
+            [(open_count, "#007AFF"), (closed_count, "#ff5252")],
+            total=total_donors,
         )
         idx_fl.addWidget(self._idx_bar)
-        idx_legend = QLabel("● Открыто  ● Закрыто")
-        idx_legend.setObjectName("secondary")
-        idx_fl.addWidget(idx_legend)
+        self._idx_legend_lbl = QLabel(
+            '<span style="color:#007AFF">■ Открыто</span>'
+            '  <span style="color:#ff5252">■ Закрыто</span>'
+        )
+        self._idx_legend_lbl.setObjectName("secondary")
+        idx_fl.addWidget(self._idx_legend_lbl)
         analytics_row.addWidget(idx_frame)
 
         self._root.addLayout(analytics_row)
 
         # ── Data Tabs ─────────────────────────────────────────────────────
         self._data_tabs = QTabWidget()
+        self._data_tabs.addTab(
+            self._build_domains_tab(backlinks, domains), "По доменам"
+        )
         self._data_tabs.addTab(
             self._build_donors_tab(donors, backlinks), "Доноры"
         )
@@ -350,7 +459,80 @@ class ReportView(QWidget):
         self._data_tabs.addTab(
             self._build_anchors_tab(anchor_stats), "Топ анкоры"
         )
+        self._data_tabs.setCurrentIndex(_active_tab)
         self._root.addWidget(self._data_tabs)
+
+    # ── Domains tab ───────────────────────────────────────────────────────
+
+    def _build_domains_tab(self, backlinks: list, target_domains: list) -> QWidget:
+        """One row per target domain: found/not-found with backlink and donor counts."""
+        rows_data = []
+        for orig in target_domains:
+            norm = normalize_domain(orig)
+            matched = [
+                bl for bl in backlinks
+                if matches_target(bl["target_url"] or "", norm)
+            ]
+            donor_ids = {bl["donor_id"] for bl in matched}
+            df = sum(1 for bl in matched if bl["rel_type"] == "dofollow")
+            rows_data.append({
+                "domain":    orig,
+                "donors":    len(donor_ids),
+                "backlinks": len(matched),
+                "dofollow":  df,
+                "nofollow":  len(matched) - df,
+                "found":     len(matched) > 0,
+            })
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        table = QTableWidget(len(rows_data), 5)
+        table.setHorizontalHeaderLabels(
+            ["ЦЕЛЕВОЙ ДОМЕН", "ДОНОРОВ", "БЭКЛИНКОВ", "DOFOLLOW / NOFOLLOW", "СТАТУС"]
+        )
+        _hh = table.horizontalHeader()
+        if _hh:
+            _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            _hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            _hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        _vh = table.verticalHeader()
+        if _vh:
+            _vh.setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSortingEnabled(False)
+
+        for i, row in enumerate(rows_data):
+            table.setItem(i, 0, QTableWidgetItem(row["domain"]))
+
+            donors_item = QTableWidgetItem()
+            donors_item.setData(Qt.ItemDataRole.DisplayRole, row["donors"])
+            table.setItem(i, 1, donors_item)
+
+            bl_item = QTableWidgetItem()
+            bl_item.setData(Qt.ItemDataRole.DisplayRole, row["backlinks"])
+            table.setItem(i, 2, bl_item)
+
+            df_nf_item = QTableWidgetItem(f"{row['dofollow']} / {row['nofollow']}")
+            if row["backlinks"] > 0:
+                if row["nofollow"] == 0:
+                    df_nf_item.setForeground(QColor(REL_COLORS["dofollow"]))
+                elif row["dofollow"] == 0:
+                    df_nf_item.setForeground(QColor(REL_COLORS["nofollow"]))
+                else:
+                    df_nf_item.setForeground(QColor("#ffa726"))
+            table.setItem(i, 3, df_nf_item)
+
+            status_text = "✅ Найден" if row["found"] else "❌ Не найден"
+            status_item = QTableWidgetItem(status_text)
+            status_item.setForeground(QColor("#00c853" if row["found"] else "#ff5252"))
+            table.setItem(i, 4, status_item)
+
+        table.setSortingEnabled(True)
+        layout.addWidget(table)
+        return widget
 
     # ── Donors tab ────────────────────────────────────────────────────────
 
@@ -367,6 +549,10 @@ class ReportView(QWidget):
         layout.addWidget(self._donor_search)
 
         # Filters row
+        self._type_btns = {}
+        self._index_btns = {}
+        self._status_btns = {}
+
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("ТИП:"))
         for key, label in [("all","Все"),("dofollow","Dofollow"),("nofollow","Nofollow"),
@@ -375,6 +561,7 @@ class ReportView(QWidget):
             btn.setCheckable(True)
             btn.setChecked(key == self._donor_filter_type)
             btn.clicked.connect(lambda _, k=key: self._set_type_filter(k))
+            self._type_btns[key] = btn
             filter_row.addWidget(btn)
 
         filter_row.addSpacing(16)
@@ -384,6 +571,7 @@ class ReportView(QWidget):
             btn.setCheckable(True)
             btn.setChecked(key == self._donor_filter_index)
             btn.clicked.connect(lambda _, k=key: self._set_index_filter(k))
+            self._index_btns[key] = btn
             filter_row.addWidget(btn)
 
         filter_row.addSpacing(16)
@@ -394,6 +582,7 @@ class ReportView(QWidget):
             btn.setCheckable(True)
             btn.setChecked(key == self._donor_filter_status)
             btn.clicked.connect(lambda _, k=key: self._set_status_filter(k))
+            self._status_btns[key] = btn
             filter_row.addWidget(btn)
 
         filter_row.addStretch()
@@ -413,6 +602,8 @@ class ReportView(QWidget):
         _vh = self._donor_table.verticalHeader()
         if _vh:
             _vh.setVisible(False)
+        self._donor_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._donor_table.customContextMenuRequested.connect(self._show_donor_context_menu)
         layout.addWidget(self._donor_table)
 
         self._donors_cache = donors
@@ -435,10 +626,7 @@ class ReportView(QWidget):
             if search_text and search_text not in donor["url"].lower():
                 continue
             if self._donor_filter_index != "all":
-                _se_col_filter = {
-                    "google": "index_google", "yandex": "index_yandex",
-                    "bing": "index_bing", "baidu": "index_baidu",
-                }.get(self._current_se, "index_google")
+                _se_col_filter = _SE_INDEX_COL.get(self._current_se, "index_google")
                 if donor[_se_col_filter] != self._donor_filter_index:
                     continue
             if self._donor_filter_status != "all":
@@ -449,13 +637,15 @@ class ReportView(QWidget):
 
             if self._donor_filter_type != "all":
                 donor_bls = [b for b in donor_bls if b["rel_type"] == self._donor_filter_type]
+                if not donor_bls:
+                    continue
 
             row = self._donor_table.rowCount()
             self._donor_table.insertRow(row)
 
             # Column 0: URL + status
             status_code = donor["http_status"]
-            color = HTTP_COLORS.get((status_code or 0) // 100, "#888") if status_code else "#888"
+            color = HTTP_COLORS.get(int(status_code) // 100, "#888") if status_code else "#888"
             status_str = str(status_code) if status_code else donor["error_code"] or "—"
             url_cell = QLabel(f'<b style="color:{color}">{status_str}</b>  '
                               f'<a href="{donor["url"]}">{donor["url"]}</a>')
@@ -465,13 +655,18 @@ class ReportView(QWidget):
             self._donor_table.setCellWidget(row, 0, url_cell)
 
             # Column 1: indexability — use active SE tab
-            _se_col = {
-                "google": "index_google", "yandex": "index_yandex",
-                "bing": "index_bing", "baidu": "index_baidu",
-            }.get(self._current_se, "index_google")
-            idx_val = donor[_se_col] or "—"
-            idx_color = "#00c853" if idx_val == "open" else "#ff5252"
-            idx_item = QTableWidgetItem("Открыто" if idx_val == "open" else "Закрыто")
+            _se_col = _SE_INDEX_COL.get(self._current_se, "index_google")
+            idx_val = donor[_se_col]  # None = not yet checked
+            if idx_val == "open":
+                idx_color = "#00c853"
+                idx_text = "Открыто"
+            elif idx_val == "closed":
+                idx_color = "#ff5252"
+                idx_text = "Закрыто"
+            else:
+                idx_color = "#888888"
+                idx_text = "—"
+            idx_item = QTableWidgetItem(idx_text)
             idx_item.setForeground(QColor(idx_color))
             self._donor_table.setItem(row, 1, idx_item)
 
@@ -487,8 +682,10 @@ class ReportView(QWidget):
             bl_item.setToolTip(bls_text)
             self._donor_table.setItem(row, 2, bl_item)
 
-            # Column 3-4: link counts
-            self._donor_table.setItem(row, 3, QTableWidgetItem(str(donor["internal_links"] or 0)))
+            # Column 3-4: link counts (donor URL stored in col-3 UserRole for context menu)
+            int_item = QTableWidgetItem(str(donor["internal_links"] or 0))
+            int_item.setData(Qt.ItemDataRole.UserRole, donor["url"])
+            self._donor_table.setItem(row, 3, int_item)
             self._donor_table.setItem(row, 4, QTableWidgetItem(str(donor["external_links"] or 0)))
 
             self._donor_table.setRowHeight(row, max(60, 24 * max(len(donor_bls), 1)))
@@ -498,14 +695,20 @@ class ReportView(QWidget):
 
     def _set_type_filter(self, key):
         self._donor_filter_type = key
+        for k, btn in self._type_btns.items():
+            btn.setChecked(k == key)
         self._refilter()
 
     def _set_index_filter(self, key):
         self._donor_filter_index = key
+        for k, btn in self._index_btns.items():
+            btn.setChecked(k == key)
         self._refilter()
 
     def _set_status_filter(self, key):
         self._donor_filter_status = key
+        for k, btn in self._status_btns.items():
+            btn.setChecked(k == key)
         self._refilter()
 
     # ── Backlinks tab ─────────────────────────────────────────────────────
@@ -536,6 +739,9 @@ class ReportView(QWidget):
         self._bl_table.setAlternatingRowColors(True)
         self._bl_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._bl_table.setSortingEnabled(True)
+        self._bl_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._bl_table.customContextMenuRequested.connect(self._show_bl_context_menu)
+        self._bl_table.cellDoubleClicked.connect(self._on_bl_double_click)
         layout.addWidget(self._bl_table)
 
         self._backlinks_cache = backlinks          # shared with donors tab
@@ -565,23 +771,27 @@ class ReportView(QWidget):
             row = self._bl_table.rowCount()
             self._bl_table.insertRow(row)
 
-            # Col 0: donor URL (clickable)
-            donor_lbl = QLabel(f'<a href="{donor_url}">{donor_url}</a>')
-            donor_lbl.setOpenExternalLinks(True)
-            donor_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-            donor_lbl.setContentsMargins(4, 2, 4, 2)
-            self._bl_table.setCellWidget(row, 0, donor_lbl)
+            # Col 0: donor URL — plain item so sorting moves it with its row
+            donor_item = QTableWidgetItem(donor_url)
+            donor_item.setForeground(QColor("#42a5f5"))
+            donor_item.setToolTip(donor_url)
+            self._bl_table.setItem(row, 0, donor_item)
 
-            # Col 1: target URL (clickable)
-            target_lbl = QLabel(f'<a href="{target_url}">{target_url}</a>')
-            target_lbl.setOpenExternalLinks(True)
-            target_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-            target_lbl.setContentsMargins(4, 2, 4, 2)
-            self._bl_table.setCellWidget(row, 1, target_lbl)
+            # Col 1: target URL — same treatment
+            target_item = QTableWidgetItem(target_url)
+            target_item.setForeground(QColor("#42a5f5"))
+            target_item.setToolTip(target_url)
+            self._bl_table.setItem(row, 1, target_item)
 
-            # Col 2: anchor text — context shown in tooltip
+            # Col 2: anchor text — context in tooltip; donor_url/target_url/context
+            # stored in UserRole so context menu and double-click can retrieve them.
             anchor_item = QTableWidgetItem(anchor or "—")
             anchor_item.setToolTip(bl["context_html"] or "")
+            anchor_item.setData(Qt.ItemDataRole.UserRole, {
+                "donor_url":    donor_url,
+                "target_url":   target_url,
+                "context_html": bl["context_html"] or "",
+            })
             self._bl_table.setItem(row, 2, anchor_item)
 
             # Col 3: anchor type
@@ -660,6 +870,96 @@ class ReportView(QWidget):
         layout.addWidget(table)
         return widget
 
+    # ── Backlinks context menu & HTML dialog ──────────────────────────────
+
+    def _get_bl_row_data(self, row: int) -> dict | None:
+        item = self._bl_table.item(row, 2)
+        if not item:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def _show_bl_context_menu(self, pos) -> None:
+        row = self._bl_table.rowAt(pos.y())
+        if row < 0:
+            return
+        data = self._get_bl_row_data(row)
+        if not data:
+            return
+
+        menu = QMenu(self)
+        menu.addAction(
+            "Копировать URL донора",
+            lambda: _clipboard_set(data["donor_url"]),
+        )
+        menu.addAction(
+            "Копировать URL цели",
+            lambda: _clipboard_set(data["target_url"]),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            "Просмотр HTML-контекста",
+            lambda: self._show_context_dialog(data["context_html"]),
+        )
+        vp = self._bl_table.viewport()
+        if vp:
+            menu.exec(vp.mapToGlobal(pos))
+
+    def _on_bl_double_click(self, row: int, col: int) -> None:
+        if col == 0:
+            item = self._bl_table.item(row, 0)
+            if item and item.text():
+                QDesktopServices.openUrl(QUrl(item.text()))
+            return
+        if col == 1:
+            item = self._bl_table.item(row, 1)
+            if item and item.text():
+                QDesktopServices.openUrl(QUrl(item.text()))
+            return
+        data = self._get_bl_row_data(row)
+        if data and data["context_html"]:
+            self._show_context_dialog(data["context_html"])
+
+    def _show_context_dialog(self, context_html: str) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("HTML-контекст ссылки")
+        dialog.setMinimumSize(400, 160)
+        dialog.setMaximumSize(1100, 560)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        editor = QTextEdit()
+        editor.setReadOnly(True)
+        editor.setPlainText(context_html)
+        editor.setFont(QFont("Courier New", 10))
+        layout.addWidget(editor)
+
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        dialog.adjustSize()
+        dialog.exec()
+
+    # ── Donors context menu ───────────────────────────────────────────────
+
+    def _show_donor_context_menu(self, pos) -> None:
+        row = self._donor_table.rowAt(pos.y())
+        if row < 0:
+            return
+        item = self._donor_table.item(row, 3)
+        url = item.data(Qt.ItemDataRole.UserRole) if item else ""
+        if not url:
+            return
+        menu = QMenu(self)
+        menu.addAction(
+            "Копировать URL донора",
+            lambda: _clipboard_set(url),
+        )
+        vp = self._donor_table.viewport()
+        if vp:
+            menu.exec(vp.mapToGlobal(pos))
+
     # ── SE switching ──────────────────────────────────────────────────────
 
     def _switch_se(self, key: str):
@@ -674,15 +974,14 @@ class ReportView(QWidget):
         """Refresh the ИНДЕКСИРУЕМОСТЬ card to match the active SE tab."""
         if not hasattr(self, "_idx_nums_lbl") or not self._donors_cache:
             return
-        col = {
-            "google": "index_google", "yandex": "index_yandex",
-            "bing": "index_bing", "baidu": "index_baidu",
-        }.get(self._current_se, "index_google")
-        open_count = sum(1 for d in self._donors_cache if d[col] == "open")
-        closed_count = len(self._donors_cache) - open_count
+        col = _SE_INDEX_COL.get(self._current_se, "index_google")
+        open_count   = sum(1 for d in self._donors_cache if d[col] == "open")
+        closed_count = sum(1 for d in self._donors_cache if d[col] == "closed")
         self._idx_nums_lbl.setText(f"{open_count} / {closed_count}")
-        self._idx_bar.setMaximum(max(len(self._donors_cache), 1))
-        self._idx_bar.setValue(open_count)
+        self._idx_bar.set_segments(
+            [(open_count, "#007AFF"), (closed_count, "#ff5252")],
+            total=len(self._donors_cache),
+        )
 
     # ── Actions ───────────────────────────────────────────────────────────
 
@@ -690,6 +989,10 @@ class ReportView(QWidget):
         menu = QMenu(self)
         menu.addAction("Повторить проверку",
                        lambda: self._app and self._app.retry_task(self._task_id))
+        menu.addAction("Повторить неудачные",
+                       lambda: self._app and self._app.retry_failed_task(self._task_id))
+        menu.addAction("Дублировать задание",
+                       lambda: self._app and self._app.clone_task(self._task_id))
         menu.addAction("Экспортировать в .xlsx",
                        lambda: self._app and self._app.export_task(self._task_id))
         menu.addSeparator()
@@ -697,19 +1000,8 @@ class ReportView(QWidget):
         menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _confirm_delete(self) -> None:
-        if not self._app or not self._task_id:
-            return
-        task = db.get_task(self._task_id)
-        name = task["name"] if task else f"#{self._task_id}"
-        reply = QMessageBox.question(
-            self,
-            "Удалить задание",
-            f"Удалить задание «{name}»?\n\nВсе доноры и бэклинки будут удалены безвозвратно.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self._app.delete_task(self._task_id)
+        if self._app and self._task_id:
+            self._app.confirm_and_delete_task(self._task_id, self)
 
     def _go_back(self):
         if self._app:
