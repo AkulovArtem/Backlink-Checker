@@ -5,9 +5,10 @@ Screen 1: Task list with search, date filters, sortable table, context menu.
 import logging
 from datetime import datetime
 
-from PyQt6.QtCore import QDate, QSortFilterProxyModel, Qt
+from PyQt6.QtCore import QDate, QSortFilterProxyModel, Qt, QUrl
 from PyQt6.QtGui import (
     QColor,
+    QDesktopServices,
     QPainter,
     QPalette,
     QStandardItem,
@@ -33,6 +34,7 @@ from PyQt6.QtWidgets import (
 
 from db import database as db
 from gui.constants import STATUS_COLORS, STATUS_LABELS
+from gui.theme_toggle import ThemeToggle
 
 logger = logging.getLogger(__name__)
 
@@ -120,15 +122,19 @@ class _TaskFilterProxy(QSortFilterProxyModel):
 
 
 class TaskListView(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, dark_mode: bool = True, parent=None):
         super().__init__(parent)
         self._app = None   # set by app.py
+        self._dark_mode = dark_mode
         self._task_row_index: dict[int, int] = {}
         self._build_ui()
         self.refresh()
 
     def set_app(self, app):
         self._app = app
+
+    def theme_toggle(self) -> ThemeToggle:
+        return self._theme_btn
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -137,17 +143,30 @@ class TaskListView(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(16)
 
-        # Header
-        header = QHBoxLayout()
-        lbl = QLabel("Проверка обратных ссылок")
-        lbl.setObjectName("heading")
-        header.addWidget(lbl)
-        header.addStretch()
+        # Action bar: tg btn (left) — stretch — create btn + toggle (right)
+        action_bar = QHBoxLayout()
+        tg_btn = QPushButton("Поддержка и обновления")
+        tg_btn.setObjectName("btnTelegram")
+        tg_btn.setFixedHeight(30)
+        tg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        tg_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://t.me/akulov_pro"))
+        )
+        action_bar.addWidget(tg_btn)
+        action_bar.addStretch()
         btn_create = QPushButton("+ Создать задание")
         btn_create.setObjectName("btnCreate")
         btn_create.clicked.connect(self._go_create)
-        header.addWidget(btn_create)
-        root.addLayout(header)
+        action_bar.addWidget(btn_create)
+        action_bar.addSpacing(12)
+        self._theme_btn = ThemeToggle(self._dark_mode)
+        action_bar.addWidget(self._theme_btn)
+        root.addLayout(action_bar)
+
+        # Heading
+        lbl = QLabel("Проверка обратных ссылок")
+        lbl.setObjectName("heading")
+        root.addWidget(lbl)
 
         # Filters
         filter_bar = QHBoxLayout()

@@ -4,6 +4,7 @@ Export task results to Excel (.xlsx) with 4 sheets.
 
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime
 
 import openpyxl
@@ -11,7 +12,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from db import database as db
-from utils.url_utils import matches_target, normalize_domain
+from utils.url_utils import get_domain, matches_target, normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -220,15 +221,15 @@ def _sheet_domains(wb, backlinks, target_domains):
 
 def _sheet_anchors(wb, anchor_stats):
     ws = wb.create_sheet("Топ анкоры")
-    _write_headers(ws, ["Анкор", "Количество", "% от общего"])
+    _write_headers(ws, ["Анкор", "Ссылки", "Домены", "Dofollow / Nofollow", "% от общего"])
 
-    total = sum(r["cnt"] for r in anchor_stats) or 1
     for row_idx, row in enumerate(anchor_stats, 2):
-        pct = f"{row['cnt'] / total * 100:.1f}%"
         _write_row(ws, row_idx, [
             row["anchor_text"] or "(пусто)",
             row["cnt"],
-            pct,
+            row["domains"],
+            f"{row['dofollow']} / {row['nofollow']}",
+            f"{row['pct']:.1f}%",
         ])
 
     _auto_width(ws)
@@ -248,9 +249,30 @@ def export_to_excel(task_id: int, output_path: str) -> None:
         raise ValueError(f"Task {task_id} has corrupted target_domains") from exc
     donors = db.get_donors_for_task(task_id)
     backlinks = db.get_backlinks_for_task(task_id)
-    anchor_stats = db.get_anchor_stats(task_id)
 
     donor_map = {d["id"]: d["url"] for d in donors}
+
+    # Rich anchor stats — same logic as report_view for consistency
+    _anchor_groups: dict[str, list] = defaultdict(list)
+    for _bl in backlinks:
+        _anchor_groups[_bl["anchor_text"] or ""].append(_bl)
+    _total_bl = len(backlinks)
+    anchor_stats = []
+    for _anchor, _bls in sorted(_anchor_groups.items(), key=lambda x: -len(x[1])):
+        _df = sum(1 for b in _bls if b["rel_type"] == "dofollow")
+        _domains = len({
+            get_domain(donor_map.get(b["donor_id"], ""))
+            for b in _bls
+            if donor_map.get(b["donor_id"])
+        })
+        anchor_stats.append({
+            "anchor_text": _anchor,
+            "cnt":         len(_bls),
+            "domains":     _domains,
+            "dofollow":    _df,
+            "nofollow":    len(_bls) - _df,
+            "pct":         len(_bls) / _total_bl * 100 if _total_bl > 0 else 0.0,
+        })
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # remove default sheet

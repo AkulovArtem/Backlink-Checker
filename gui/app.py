@@ -9,7 +9,6 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
-    QHBoxLayout,
     QMainWindow,
     QMessageBox,
     QStackedWidget,
@@ -24,7 +23,6 @@ from gui.report_view import ReportView
 from gui.task_create_view import TaskCreateView
 from gui.task_list_view import TaskListView
 from gui.theme import DARK_QSS, LIGHT_QSS
-from gui.theme_toggle import ThemeToggle
 from gui.worker import CheckWorker
 
 logger = logging.getLogger(__name__)
@@ -57,21 +55,14 @@ class MainApp(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Theme toggle button (top-right)
-        top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(0, 4, 12, 0)
-        top_bar.addStretch()
-        self._theme_btn = ThemeToggle(self._dark_mode)
-        self._theme_btn.toggled.connect(self._toggle_theme)
-        top_bar.addWidget(self._theme_btn)
-        main_layout.addLayout(top_bar)
-
         # Screens
         self._stack = QStackedWidget()
         main_layout.addWidget(self._stack)
 
-        self._list_view = TaskListView()
+        self._list_view = TaskListView(dark_mode=self._dark_mode)
         self._list_view.set_app(self)
+        self._theme_btn = self._list_view.theme_toggle()
+        self._theme_btn.toggled.connect(self._toggle_theme)
 
         self._create_view = TaskCreateView()
         self._create_view.set_app(self)

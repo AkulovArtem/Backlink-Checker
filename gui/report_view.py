@@ -223,6 +223,7 @@ class ReportView(QWidget):
 
     def load_task(self, task_id: int):
         self._task_id = task_id
+        _active_tab = self._data_tabs.currentIndex() if hasattr(self, "_data_tabs") else 0
         self._clear()
 
         task = db.get_task(task_id)
@@ -458,6 +459,7 @@ class ReportView(QWidget):
         self._data_tabs.addTab(
             self._build_anchors_tab(anchor_stats), "Топ анкоры"
         )
+        self._data_tabs.setCurrentIndex(_active_tab)
         self._root.addWidget(self._data_tabs)
 
     # ── Domains tab ───────────────────────────────────────────────────────
