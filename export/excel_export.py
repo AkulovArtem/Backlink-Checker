@@ -4,6 +4,7 @@ Export task results to Excel (.xlsx) with 4 sheets.
 
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime
 
@@ -15,6 +16,18 @@ from db import database as db
 from utils.url_utils import get_domain, matches_target, normalize_domain
 
 logger = logging.getLogger(__name__)
+
+# XML 1.0 prohibits control characters except \t \n \r; also surrogates and U+FFFE/FFFF.
+# Scraped content can contain them, causing Excel's "recovery" dialog on open.
+_ILLEGAL_XML_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+
+
+def _sanitize(val):
+    """Strip illegal XML 1.0 characters from strings so Excel opens without errors."""
+    if isinstance(val, str):
+        return _ILLEGAL_XML_RE.sub("", val)
+    return val
+
 
 # Colour palette — 8-char ARGB (AARRGGBB) as required by OOXML spec.
 # 6-char RGB causes Excel to show a "recovery" dialog on open.
@@ -84,7 +97,14 @@ def _http_fill(status_code) -> PatternFill | None:
 def _write_row(ws, row_idx: int, values: list, zebra: bool = True):
     fill = _zebra_fill(row_idx) if zebra else None
     for col, val in enumerate(values, 1):
-        cell = ws.cell(row=row_idx, column=col, value=val)
+        sanitized = _sanitize(val)
+        cell = ws.cell(row=row_idx, column=col)
+        if isinstance(sanitized, str):
+            # Prevent openpyxl from auto-setting data_type='f' for strings
+            # starting with '=' (e.g. anchor text, URLs, HTML snippets).
+            cell.set_explicit_value(sanitized, data_type="s")
+        else:
+            cell.value = sanitized
         cell.alignment = Alignment(vertical="top", wrap_text=True)
         cell.border = _border()
         if fill:
@@ -140,7 +160,12 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
 
     for r, (key, val) in enumerate(rows, 1):
         ws.cell(row=r, column=1, value=key).font = Font(bold=True)
-        ws.cell(row=r, column=2, value=val)
+        sanitized = _sanitize(val)
+        cell2 = ws.cell(row=r, column=2)
+        if isinstance(sanitized, str):
+            cell2.set_explicit_value(sanitized, data_type="s")
+        else:
+            cell2.value = sanitized
 
 
 def _sheet_donors(wb, donors, backlinks):
