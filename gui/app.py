@@ -6,6 +6,7 @@ import json
 import logging
 
 from PyQt6.QtCore import QTimer
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -24,6 +25,7 @@ from gui.task_create_view import TaskCreateView
 from gui.task_list_view import TaskListView
 from gui.theme import DARK_QSS, LIGHT_QSS
 from gui.worker import CheckWorker
+from utils.resource_path import resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +38,11 @@ class MainApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Backlink Checker - проверка обратных ссылок | Version 1.0.1")
+        self.setWindowIcon(QIcon(resource_path("icon.ico")))
         self.setMinimumSize(1200, 700)
         self.resize(1400, 800)
 
-        self._dark_mode = db.get_setting("theme", "dark") == "dark"
+        self._dark_mode = db.get_setting("theme", "light") == "dark"
         self._workers: dict[int, CheckWorker] = {}
 
         # Throttle report refresh to at most once per second during active checks

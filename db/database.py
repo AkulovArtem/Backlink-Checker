@@ -5,9 +5,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from utils.resource_path import data_path
+
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent.parent / "backlink_checker.db"
+DB_PATH = data_path("backlink_checker.db")
 
 
 @contextmanager
