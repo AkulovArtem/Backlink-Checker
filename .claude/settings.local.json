@@ -21,7 +21,18 @@
       "Bash(findstr /i \"pyqt6 playwright beautifulsoup4 openpyxl lxml flake8 ruff pyflakes\")",
       "Bash(ruff check *)",
       "PowerShell(python -m ruff --version 2>&1; python -m flake8 --version 2>&1; python -m py_compile --help 2>&1 | Select-Object -First 2)",
-      "Bash(python -c \"import gui.app\")"
+      "Bash(python -c \"import gui.app\")",
+      "Bash(pip show *)",
+      "Bash(python -c \"import playwright; from pathlib import Path; p = Path\\(playwright.__file__\\).parent; print\\('Package dir:', p\\); driver = p / 'driver'; print\\('Driver exists:', driver.exists\\(\\)\\); [print\\(' ', f.name, f.stat\\(\\).st_size // 1024, 'KB'\\) for f in driver.iterdir\\(\\)] if driver.exists\\(\\) else print\\('NO DRIVER DIR'\\)\")",
+      "Bash(python *)",
+      "Bash(findstr /i \"PyQt6 playwright beautifulsoup4 openpyxl lxml pyinstaller\")",
+      "PowerShell(pip install *)",
+      "PowerShell(python -c \"import playwright; print\\(playwright.__version__, playwright.__file__\\)\")",
+      "PowerShell(python -c \"import playwright; print\\(playwright.__file__\\)\")",
+      "PowerShell(python -m playwright --version)",
+      "PowerShell(python -m PyInstaller --version 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\2mrha\\\\PycharmProjects\\\\Parsers\\\\Backlink Checker\\\\build.bat\" 2>&1)",
+      "PowerShell(python -m playwright install chromium 2>&1)"
     ]
   }
 }
