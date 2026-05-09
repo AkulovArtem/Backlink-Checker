@@ -1,5 +1,5 @@
-PyQt6>=6.11
-playwright>=1.58
-beautifulsoup4>=4.14
-openpyxl>=3.1
-lxml>=6.1
+PyQt6==6.11.0
+playwright==1.59.0
+beautifulsoup4==4.14.3
+openpyxl==3.1.5
+lxml==6.1.0

@@ -3,14 +3,24 @@ Entry point for Backlink Checker desktop application.
 """
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
-# Log file sits next to the script/executable regardless of working directory
-_LOG_PATH = Path(__file__).parent / "backlink_checker.log"
+# When frozen by PyInstaller, point playwright to the user-level browser install
+# so Chromium is found without needing it bundled inside the EXE.
+if getattr(sys, "frozen", False) and "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
+    # Chromium is bundled inside the EXE; PyInstaller extracts it to _MEIPASS at runtime.
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = sys._MEIPASS
+
+from utils.resource_path import data_path, resource_path  # noqa: E402
+
+# Log file sits next to the EXE (frozen) or project root (dev)
+_LOG_PATH = data_path("backlink_checker.log")
 
 # Configure logging before importing anything else
 logging.basicConfig(
@@ -34,8 +44,15 @@ from gui.app import MainApp  # noqa: E402
 def main():
     db.init_db()
 
+    # Tell Windows to use our EXE icon in the taskbar instead of the generic Python one.
+    # Must be set before QApplication is created.
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BacklinkChecker.App")
+
     app = QApplication(sys.argv)
     app.setApplicationName("Backlink Checker")
+    app.setWindowIcon(QIcon(resource_path("icon.ico")))
 
     window = MainApp()
     window.show()
