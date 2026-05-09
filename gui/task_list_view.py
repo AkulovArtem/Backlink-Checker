@@ -98,6 +98,14 @@ class _TaskFilterProxy(QSortFilterProxyModel):
         self._date_to = date_to
         self.invalidateFilter()
 
+    def lessThan(self, left, right) -> bool:
+        # Date column: compare ISO strings stored in UserRole (sorts correctly)
+        if left.column() == COL_CREATED:
+            l_iso = left.data(Qt.ItemDataRole.UserRole + 1) or ""
+            r_iso = right.data(Qt.ItemDataRole.UserRole + 1) or ""
+            return l_iso < r_iso
+        return super().lessThan(left, right)
+
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
         model = self.sourceModel()
         if not isinstance(model, QStandardItemModel):
@@ -244,21 +252,32 @@ class TaskListView(QWidget):
             progress = task["progress"]
 
             # Format created_at
+            created_iso = task["created_at"]
             try:
-                dt = datetime.fromisoformat(task["created_at"])
+                dt = datetime.fromisoformat(created_iso)
                 created_str = dt.strftime("%d.%m.%Y %H:%M")
             except Exception:
-                created_str = task["created_at"]
+                created_str = created_iso
 
             status_label = STATUS_LABELS.get(status, status)
             if status == "running" and progress > 0:
                 status_label = f"🔄 В процессе ({progress}%)"
 
+            date_item = QStandardItem(created_str)
+            # ISO string stored as sort key so lessThan sorts chronologically
+            date_item.setData(created_iso, Qt.ItemDataRole.UserRole + 1)
+
+            donors_item = QStandardItem()
+            donors_item.setData(donor_count, Qt.ItemDataRole.DisplayRole)
+
+            backlinks_item = QStandardItem()
+            backlinks_item.setData(backlink_count, Qt.ItemDataRole.DisplayRole)
+
             items = [
-                QStandardItem(created_str),
+                date_item,
                 QStandardItem(task["name"]),
-                QStandardItem(str(donor_count)),
-                QStandardItem(str(backlink_count)),
+                donors_item,
+                backlinks_item,
                 QStandardItem(status_label),
                 QStandardItem("⋮"),
             ]
@@ -297,7 +316,7 @@ class TaskListView(QWidget):
             progress if status == "running" else None, _PROGRESS_ROLE
         )
         bl = db.count_task_backlinks(task_id)
-        self._model.item(row, COL_BACKLINKS).setText(str(bl))
+        self._model.item(row, COL_BACKLINKS).setData(bl, Qt.ItemDataRole.DisplayRole)
 
     # ── Filtering ─────────────────────────────────────────────────────────
 
