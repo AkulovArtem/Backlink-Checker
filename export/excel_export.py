@@ -99,7 +99,15 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
     text_count = sum(1 for bl in backlinks if bl["anchor_type"] == "text")
     img_count  = len(backlinks) - text_count
     open_count   = sum(1 for d in donors if d["index_google"] == "open")
-    closed_count = total_donors - open_count
+    closed_count = sum(1 for d in donors if d["index_google"] == "closed")
+    unknown_count = total_donors - open_count - closed_count  # not loaded / pending
+
+    _STATUS_RU = {
+        "pending":   "В очереди",
+        "running":   "В процессе",
+        "completed": "Завершено",
+        "error":     "Ошибка",
+    }
 
     try:
         dt = datetime.fromisoformat(task["created_at"])
@@ -108,19 +116,20 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
         created_str = str(task["created_at"])
 
     rows = [
-        ("Название задания",      task["name"]),
-        ("Дата создания",         created_str),
-        ("Статус",                task["status"]),
-        ("Доноров",               total_donors),
-        ("Целевые домены",        ", ".join(target_domains)),
-        ("",                      ""),
-        ("Всего бэклинков",       len(backlinks)),
-        ("Dofollow",              df_count),
-        ("Nofollow",              nf_count),
-        ("Текстовые анкоры",      text_count),
-        ("Графические анкоры",    img_count),
+        ("Название задания",         task["name"]),
+        ("Дата создания",            created_str),
+        ("Статус",                   _STATUS_RU.get(task["status"], task["status"])),
+        ("Доноров",                  total_donors),
+        ("Целевые домены",           ", ".join(target_domains)),
+        ("",                         ""),
+        ("Всего бэклинков",          len(backlinks)),
+        ("Dofollow",                 df_count),
+        ("Nofollow",                 nf_count),
+        ("Текстовые анкоры",         text_count),
+        ("Графические анкоры",       img_count),
         ("Страниц открыто (Google)", open_count),
         ("Страниц закрыто (Google)", closed_count),
+        ("Страниц не определено",    unknown_count),
     ]
 
     ws.column_dimensions["A"].width = 28

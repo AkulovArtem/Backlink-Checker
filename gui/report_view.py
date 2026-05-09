@@ -224,6 +224,8 @@ class ReportView(QWidget):
     def load_task(self, task_id: int):
         self._task_id = task_id
         _active_tab = self._data_tabs.currentIndex() if hasattr(self, "_data_tabs") else 0
+        _donor_search_text = self._donor_search.text() if hasattr(self, "_donor_search") else ""
+        _bl_search_text = self._bl_search.text() if hasattr(self, "_bl_search") else ""
         self._clear()
 
         task = db.get_task(task_id)
@@ -461,6 +463,12 @@ class ReportView(QWidget):
         )
         self._data_tabs.setCurrentIndex(_active_tab)
         self._root.addWidget(self._data_tabs)
+
+        # Restore search text lost when widgets were recreated during refresh
+        if _donor_search_text:
+            self._donor_search.setText(_donor_search_text)
+        if _bl_search_text:
+            self._bl_search.setText(_bl_search_text)
 
     # ── Domains tab ───────────────────────────────────────────────────────
 

@@ -32,7 +32,10 @@
       "PowerShell(python -m playwright --version)",
       "PowerShell(python -m PyInstaller --version 2>&1)",
       "PowerShell(& \"C:\\\\Users\\\\2mrha\\\\PycharmProjects\\\\Parsers\\\\Backlink Checker\\\\build.bat\" 2>&1)",
-      "PowerShell(python -m playwright install chromium 2>&1)"
+      "PowerShell(python -m playwright install chromium 2>&1)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(python -c \"import playwright; from pathlib import Path; p = Path\\(playwright.__file__\\).parent; print\\('pw dir:', p\\); import os; local = os.environ.get\\('LOCALAPPDATA'\\); print\\('LOCALAPPDATA:', local\\); from pathlib import Path; ms = Path\\(local\\) / 'ms-playwright'; print\\('exists:', ms.exists\\(\\)\\); [print\\(d.name\\) for d in ms.iterdir\\(\\)] if ms.exists\\(\\) else print\\('empty'\\)\")",
+      "PowerShell(\\(Get-Item \"C:\\\\Users\\\\2mrha\\\\PycharmProjects\\\\Parsers\\\\Backlink Checker\\\\dist\\\\Backlink Checker.exe\"\\).Length / 1MB | ForEach-Object { [math]::Round\\($_, 1\\) })"
     ]
   }
 }
