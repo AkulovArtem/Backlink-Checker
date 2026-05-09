@@ -4,6 +4,7 @@ Export task results to Excel (.xlsx) with 4 sheets.
 
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime
 
@@ -16,13 +17,28 @@ from utils.url_utils import get_domain, matches_target, normalize_domain
 
 logger = logging.getLogger(__name__)
 
-# Colour palette
-CLR_HEADER    = "1E1E3A"
-CLR_HEADER_FG = "E0E0E0"
-CLR_GREEN     = "C8F7DC"
-CLR_ORANGE    = "FFE0B2"
-CLR_RED       = "FFCDD2"
-CLR_ZEBRA     = "F5F5FF"
+# XML 1.0 prohibits control characters except \t \n \r; also surrogates and U+FFFE/FFFF.
+# Scraped content can contain them, causing Excel's "recovery" dialog on open.
+_ILLEGAL_XML_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+
+
+def _sanitize(val):
+    """Strip illegal XML 1.0 characters from strings so Excel opens without errors."""
+    if isinstance(val, str):
+        return _ILLEGAL_XML_RE.sub("", val)
+    return val
+
+
+# Colour palette — 8-char ARGB (AARRGGBB) as required by OOXML spec.
+# 6-char RGB causes Excel to show a "recovery" dialog on open.
+CLR_HEADER    = "FF1E1E3A"
+CLR_HEADER_FG = "FFE0E0E0"
+CLR_GREEN     = "FFC8F7DC"
+CLR_ORANGE    = "FFFFE0B2"
+CLR_RED       = "FFFFCDD2"
+CLR_ZEBRA     = "FFF5F5FF"
+CLR_WHITE     = "FFFFFFFF"
+CLR_BORDER    = "FFCCCCCC"
 
 
 def _header_font():
@@ -30,11 +46,11 @@ def _header_font():
 
 
 def _header_fill():
-    return PatternFill("solid", fgColor=CLR_HEADER)
+    return PatternFill(patternType="solid", fgColor=CLR_HEADER, bgColor=CLR_WHITE)
 
 
 def _border():
-    thin = Side(style="thin", color="CCCCCC")
+    thin = Side(style="thin", color=CLR_BORDER)
     return Border(left=thin, right=thin, top=thin, bottom=thin)
 
 
@@ -62,7 +78,7 @@ def _auto_width(ws, min_w=10, max_w=60):
 
 
 def _zebra_fill(row: int) -> PatternFill | None:
-    return PatternFill("solid", fgColor=CLR_ZEBRA) if row % 2 == 0 else None
+    return PatternFill(patternType="solid", fgColor=CLR_ZEBRA, bgColor=CLR_WHITE) if row % 2 == 0 else None
 
 
 def _http_fill(status_code) -> PatternFill | None:
@@ -70,18 +86,25 @@ def _http_fill(status_code) -> PatternFill | None:
         return None
     grp = status_code // 100
     if grp == 2:
-        return PatternFill("solid", fgColor=CLR_GREEN)
+        return PatternFill(patternType="solid", fgColor=CLR_GREEN, bgColor=CLR_WHITE)
     if grp == 4:
-        return PatternFill("solid", fgColor=CLR_ORANGE)
+        return PatternFill(patternType="solid", fgColor=CLR_ORANGE, bgColor=CLR_WHITE)
     if grp == 5:
-        return PatternFill("solid", fgColor=CLR_RED)
+        return PatternFill(patternType="solid", fgColor=CLR_RED, bgColor=CLR_WHITE)
     return None
 
 
 def _write_row(ws, row_idx: int, values: list, zebra: bool = True):
     fill = _zebra_fill(row_idx) if zebra else None
     for col, val in enumerate(values, 1):
-        cell = ws.cell(row=row_idx, column=col, value=val)
+        sanitized = _sanitize(val)
+        cell = ws.cell(row=row_idx, column=col)
+        if isinstance(sanitized, str):
+            # Prevent openpyxl from auto-setting data_type='f' for strings
+            # starting with '=' (e.g. anchor text, URLs, HTML snippets).
+            cell.set_explicit_value(sanitized, data_type="s")
+        else:
+            cell.value = sanitized
         cell.alignment = Alignment(vertical="top", wrap_text=True)
         cell.border = _border()
         if fill:
@@ -99,7 +122,15 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
     text_count = sum(1 for bl in backlinks if bl["anchor_type"] == "text")
     img_count  = len(backlinks) - text_count
     open_count   = sum(1 for d in donors if d["index_google"] == "open")
-    closed_count = total_donors - open_count
+    closed_count = sum(1 for d in donors if d["index_google"] == "closed")
+    unknown_count = total_donors - open_count - closed_count  # not loaded / pending
+
+    _STATUS_RU = {
+        "pending":   "В очереди",
+        "running":   "В процессе",
+        "completed": "Завершено",
+        "error":     "Ошибка",
+    }
 
     try:
         dt = datetime.fromisoformat(task["created_at"])
@@ -108,19 +139,20 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
         created_str = str(task["created_at"])
 
     rows = [
-        ("Название задания",      task["name"]),
-        ("Дата создания",         created_str),
-        ("Статус",                task["status"]),
-        ("Доноров",               total_donors),
-        ("Целевые домены",        ", ".join(target_domains)),
-        ("",                      ""),
-        ("Всего бэклинков",       len(backlinks)),
-        ("Dofollow",              df_count),
-        ("Nofollow",              nf_count),
-        ("Текстовые анкоры",      text_count),
-        ("Графические анкоры",    img_count),
+        ("Название задания",         task["name"]),
+        ("Дата создания",            created_str),
+        ("Статус",                   _STATUS_RU.get(task["status"], task["status"])),
+        ("Доноров",                  total_donors),
+        ("Целевые домены",           ", ".join(target_domains)),
+        ("",                         ""),
+        ("Всего бэклинков",          len(backlinks)),
+        ("Dofollow",                 df_count),
+        ("Nofollow",                 nf_count),
+        ("Текстовые анкоры",         text_count),
+        ("Графические анкоры",       img_count),
         ("Страниц открыто (Google)", open_count),
         ("Страниц закрыто (Google)", closed_count),
+        ("Страниц не определено",    unknown_count),
     ]
 
     ws.column_dimensions["A"].width = 28
@@ -128,7 +160,12 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
 
     for r, (key, val) in enumerate(rows, 1):
         ws.cell(row=r, column=1, value=key).font = Font(bold=True)
-        ws.cell(row=r, column=2, value=val)
+        sanitized = _sanitize(val)
+        cell2 = ws.cell(row=r, column=2)
+        if isinstance(sanitized, str):
+            cell2.set_explicit_value(sanitized, data_type="s")
+        else:
+            cell2.value = sanitized
 
 
 def _sheet_donors(wb, donors, backlinks):
@@ -213,7 +250,9 @@ def _sheet_domains(wb, backlinks, target_domains):
         _write_row(ws, row_idx, [orig, donors, len(matched), df, nf,
                                   "Найден" if found else "Не найден"])
         ws.cell(row=row_idx, column=6).fill = PatternFill(
-            "solid", fgColor=CLR_GREEN if found else CLR_RED
+            patternType="solid",
+            fgColor=CLR_GREEN if found else CLR_RED,
+            bgColor=CLR_WHITE,
         )
 
     _auto_width(ws)
