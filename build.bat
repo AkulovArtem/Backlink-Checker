@@ -5,13 +5,9 @@ echo   Backlink Checker — build
 echo ============================================
 
 echo.
-echo [1/3] Checking PyInstaller...
-python -m PyInstaller --version > nul 2>&1
-if errorlevel 1 (
-    echo Installing PyInstaller...
-    pip install pyinstaller
-    if errorlevel 1 ( echo FAILED & pause & exit /b 1 )
-)
+echo [1/3] Installing pinned dependencies...
+python -m pip install -r requirements.txt
+if errorlevel 1 ( echo FAILED & pause & exit /b 1 )
 python -m PyInstaller --version
 echo      OK
 
