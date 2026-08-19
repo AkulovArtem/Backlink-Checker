@@ -26,7 +26,6 @@ backlink_checker.log.*
 *.xlsx
 
 # PyInstaller
-*.spec
 dist/
 build/
 
