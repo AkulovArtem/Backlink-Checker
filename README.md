@@ -1,12 +1,13 @@
 # Backlink Checker 1.2.2
 
-Бесплатная программа для Windows: проверяет сайты-доноры на наличие ссылок на ваши сайты и разбирает качество этих ссылок.
+Бесплатная программа для Windows и macOS: проверяет сайты-доноры на наличие ссылок на ваши сайты и разбирает качество этих ссылок.
 
 Страницы открываются в реальном Chromium, поэтому видны и ссылки, которые появляются после JavaScript.
 
 Сайт: [artemakulov.ru/backlink-checker](https://artemakulov.ru/backlink-checker/)  
 Telegram: [t.me/akulov_pro](https://t.me/akulov_pro)  
-Скачать для Windows x64: [BacklinkChecker.exe](https://artemakulov.ru/BacklinkChecker.exe)
+Скачать для Windows x64: [BacklinkChecker.exe](https://artemakulov.ru/BacklinkChecker.exe)  
+Скачать для macOS (Apple Silicon): [BacklinkChecker-1.2.2-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.2.2/BacklinkChecker-1.2.2-macos-arm64.dmg)
 
 ## Для кого
 
@@ -68,12 +69,14 @@ HTTP-статус, title, число внутренних и внешних сс
 
 ## Системные требования
 
-- Windows 10 / 11, 64-bit
+- Windows 10 / 11, 64-bit **или** macOS 12+ на Apple Silicon (M1 и новее)
 - от 4 GB RAM (лучше 8+ GB при большом числе потоков)
-- установка не нужна, один exe-файл
+- установка не нужна: Windows — один exe, macOS — `.app` из DMG
 - Chromium внутри программы, отдельно ставить браузер не нужно
 
-Данные хранятся в `backlink_checker.db` рядом с exe. Лог: `backlink_checker.log` (ротация 5 МБ × 3 файла).
+На Windows база и лог лежат рядом с exe. На macOS — в `~/Library/Application Support/Backlink Checker/`. Лог: `backlink_checker.log` (ротация 5 МБ × 3 файла).
+
+macOS-сборка не подписана аккаунтом Apple. При первом запуске: правый клик по приложению → Открыть.
 
 ## Сборка из исходников
 
@@ -93,7 +96,11 @@ Windows EXE:
 build.bat
 ```
 
-Либо GitHub Actions: workflow «Build Windows EXE».
+macOS DMG (только Apple Silicon):
+
+```bash
+./build_macos.sh
+```
 
 ## Скриншоты
 
