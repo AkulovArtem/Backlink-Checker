@@ -1,3 +1,5 @@
+APP_VERSION = "1.2.2"
+
 STATUS_LABELS = {
     "pending":   "⏳ В очереди",
     "running":   "🔄 В процессе",
