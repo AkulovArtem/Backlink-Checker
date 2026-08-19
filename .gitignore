@@ -14,10 +14,11 @@ build/
 venv/
 env/
 
-# IDE
+# IDE / local agent
 .idea/
 .vscode/
 *.iml
+.claude/
 
 # App data
 backlink_checker.db
