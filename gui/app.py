@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 from core.models import CheckConfig
 from db import database as db
 from export.excel_export import export_to_excel
+from gui.constants import APP_VERSION
 from gui.report_view import ReportView
 from gui.task_create_view import TaskCreateView
 from gui.task_list_view import TaskListView
@@ -37,7 +38,9 @@ SCREEN_REPORT = 2
 class MainApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Backlink Checker - проверка обратных ссылок | Version 1.0.1")
+        self.setWindowTitle(
+            f"Backlink Checker - проверка обратных ссылок | Version {APP_VERSION}"
+        )
         self.setWindowIcon(QIcon(resource_path("icon.ico")))
         self.setMinimumSize(1200, 700)
         self.resize(1400, 800)
