@@ -99,12 +99,11 @@ def _write_row(ws, row_idx: int, values: list, zebra: bool = True):
     for col, val in enumerate(values, 1):
         sanitized = _sanitize(val)
         cell = ws.cell(row=row_idx, column=col)
+        cell.value = sanitized
         if isinstance(sanitized, str):
-            # Prevent openpyxl from auto-setting data_type='f' for strings
-            # starting with '=' (e.g. anchor text, URLs, HTML snippets).
-            cell.set_explicit_value(sanitized, data_type="s")
-        else:
-            cell.value = sanitized
+            # openpyxl auto-sets data_type='f' for strings starting with '=';
+            # override to 's' so scraped content is never treated as a formula.
+            cell.data_type = "s"
         cell.alignment = Alignment(vertical="top", wrap_text=True)
         cell.border = _border()
         if fill:
@@ -162,10 +161,9 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
         ws.cell(row=r, column=1, value=key).font = Font(bold=True)
         sanitized = _sanitize(val)
         cell2 = ws.cell(row=r, column=2)
+        cell2.value = sanitized
         if isinstance(sanitized, str):
-            cell2.set_explicit_value(sanitized, data_type="s")
-        else:
-            cell2.value = sanitized
+            cell2.data_type = "s"
 
 
 def _sheet_donors(wb, donors, backlinks):
