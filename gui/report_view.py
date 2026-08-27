@@ -999,6 +999,8 @@ class ReportView(QWidget):
                        lambda: self._app and self._app.retry_task(self._task_id))
         menu.addAction("Повторить неудачные",
                        lambda: self._app and self._app.retry_failed_task(self._task_id))
+        menu.addAction("Добавить ссылки",
+                       lambda: self._app and self._app.edit_task(self._task_id))
         menu.addAction("Дублировать задание",
                        lambda: self._app and self._app.clone_task(self._task_id))
         menu.addAction("Экспортировать в .xlsx",

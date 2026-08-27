@@ -1,4 +1,4 @@
-# Backlink Checker 1.2.2
+# Backlink Checker 1.3.0
 
 Бесплатная программа для Windows и macOS: проверяет сайты-доноры на наличие ссылок на ваши сайты и разбирает качество этих ссылок.
 
@@ -7,7 +7,7 @@
 Сайт: [artemakulov.ru/backlink-checker](https://artemakulov.ru/backlink-checker/)  
 Telegram: [t.me/akulov_pro](https://t.me/akulov_pro)  
 Скачать для Windows x64: [BacklinkChecker.exe](https://artemakulov.ru/BacklinkChecker.exe)  
-Скачать для macOS (Apple Silicon): [BacklinkChecker-1.2.2-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.2.2/BacklinkChecker-1.2.2-macos-arm64.dmg)
+Скачать для macOS (Apple Silicon): [BacklinkChecker-1.3.0-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.3.0/BacklinkChecker-1.3.0-macos-arm64.dmg)
 
 ## Для кого
 
@@ -22,6 +22,7 @@ Telegram: [t.me/akulov_pro](https://t.me/akulov_pro)
 - Прокрутка страницы, чтобы подгрузить lazy-load контент; на бесконечной пагинации останавливается сама
 - Поиск ссылок на указанные целевые домены, включая поддомены
 - До 100 000 доноров и 50 целевых доменов в одном задании
+- Добавление новых доноров в уже выполненное задание — те же целевые домены, без повторной проверки старых ссылок
 - Несколько потоков, светлая и тёмная тема, SQLite рядом с exe
 
 ### Анализ ссылок
@@ -49,7 +50,8 @@ HTTP-статус, title, число внутренних и внешних сс
 1. Запустите `Backlink Checker.exe` от имени администратора. При первом запуске рядом с exe появится база данных.
 2. На главном экране нажмите «+ Создать задание» и заполните поля.
 3. Проверка идёт в несколько потоков. Клик по заданию открывает отчёт в реальном времени.
-4. Результаты можно смотреть в программе или выгрузить в Excel.
+4. Чтобы докинуть ссылки в готовое задание: меню ⋮ → «Добавить ссылки». Проверятся только новые URL, старые результаты останутся.
+5. Результаты можно смотреть в программе или выгрузить в Excel.
 
 ## Статусы и ошибки
 
@@ -95,6 +97,8 @@ Windows EXE:
 ```bat
 build.bat
 ```
+
+Либо GitHub Actions: **Actions → Build Windows EXE → Run workflow**. Артефакт: `BacklinkChecker.exe`.
 
 macOS DMG (только Apple Silicon):
 
