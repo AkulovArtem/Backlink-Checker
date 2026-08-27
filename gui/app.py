@@ -99,11 +99,20 @@ class MainApp(QMainWindow):
     # ── Task actions ──────────────────────────────────────────────────────
 
     def start_task(self, task_id: int):
+        """Check pending donors for the task. Leaves already-checked rows intact."""
+        if task_id in self._workers:
+            logger.warning("Task %d is already running", task_id)
+            return
+
         task = db.get_task(task_id)
         if not task:
             return
 
-        donors = db.get_donors_for_task(task_id)
+        donors = db.get_pending_donors_for_task(task_id)
+        if not donors:
+            logger.info("Task %d: no pending donors to check", task_id)
+            return
+
         try:
             target_domains = json.loads(task["target_domains"])
         except (json.JSONDecodeError, TypeError):
@@ -123,7 +132,7 @@ class MainApp(QMainWindow):
         worker = CheckWorker(config)
         self._workers[task_id] = worker
         self._wire_worker(worker, task_id)
-        logger.info("Task %d started", task_id)
+        logger.info("Task %d started (%d pending donor(s))", task_id, len(donors))
 
     # ── Worker lifecycle helpers ──────────────────────────────────────────
 
@@ -163,34 +172,32 @@ class MainApp(QMainWindow):
         if task_id in self._workers:
             self._stop_worker(self._workers.pop(task_id))
 
-        task = db.get_task(task_id)
-        if not task:
-            return
         failed = db.get_failed_donors_for_task(task_id)
         if not failed:
             logger.info("Task %d: no failed donors to retry", task_id)
             return
 
         db.reset_failed_donors(task_id)
-        try:
-            target_domains = json.loads(task["target_domains"])
-        except (json.JSONDecodeError, TypeError):
-            logger.error("Corrupted target_domains for task %d", task_id)
-            return
-        config = CheckConfig(
-            task_id=task_id,
-            donor_urls=[(int(d["id"]), str(d["url"])) for d in failed],
-            target_domains=target_domains,
-            user_agent_preset=task["user_agent"],
-            custom_user_agent=task["custom_user_agent"] or "",
-            threads=task["threads"],
-            timeout=task["timeout"],
-        )
-        worker = CheckWorker(config)
-        self._workers[task_id] = worker
-        self._wire_worker(worker, task_id)
+        self.start_task(task_id)
         self._list_view.refresh()
         logger.info("Task %d: retrying %d failed donor(s)", task_id, len(failed))
+
+    def edit_task(self, task_id: int):
+        """Open the create form in append mode for an existing (not running) task."""
+        if task_id in self._workers:
+            QMessageBox.information(
+                self,
+                "Задание выполняется",
+                "Дождитесь окончания проверки, затем добавьте ссылки.",
+            )
+            return
+        task = db.get_task(task_id)
+        if not task:
+            return
+        count = db.count_task_donors(task_id)
+        self._create_view.enter_append_mode(task, count)
+        self._stack.setCurrentIndex(SCREEN_CREATE)
+        logger.info("Task %d opened for appending donors", task_id)
 
     def clone_task(self, task_id: int):
         """Open the Create-task form pre-filled with an existing task's data."""

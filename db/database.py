@@ -2,14 +2,20 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Optional
+from typing import Optional, TypedDict
 
 from utils.resource_path import data_path
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = data_path("backlink_checker.db")
+
+
+class AddDonorsResult(TypedDict):
+    added: int
+    skipped_dup: int
+    skipped_cap: int
+    urls: list[str]
 
 
 @contextmanager
@@ -147,6 +153,24 @@ def delete_task(task_id: int) -> None:
         conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
 
 
+_TASK_FIELDS = frozenset({
+    "name", "user_agent", "custom_user_agent", "threads", "timeout",
+})
+
+
+def update_task_fields(task_id: int, **kwargs) -> None:
+    """Update allowed task metadata (name, UA, threads, timeout)."""
+    if not kwargs:
+        return
+    invalid = set(kwargs) - _TASK_FIELDS
+    if invalid:
+        raise ValueError(f"Invalid task field(s): {invalid}")
+    fields = ", ".join(f"{k} = ?" for k in kwargs)  # nosec B608
+    values = list(kwargs.values()) + [task_id]
+    with get_connection() as conn:
+        conn.execute(f"UPDATE tasks SET {fields} WHERE id = ?", values)  # nosec B608
+
+
 def reset_task(task_id: int) -> None:
     """Reset task to pending: delete backlinks, reset donor fields (keep URLs)."""
     with get_connection() as conn:
@@ -193,6 +217,49 @@ def create_donors_bulk(task_id: int, urls: list[str]) -> None:
         )
 
 
+def add_donors_to_task(
+    task_id: int, urls: list[str], max_total: int = 100_000
+) -> AddDonorsResult:
+    """Insert unique new donor URLs into an existing task.
+
+    Existing rows are left untouched (results stay). Duplicates (already in
+    the task or repeated in ``urls``) and URLs past ``max_total`` are skipped.
+
+    Returns {"added": int, "skipped_dup": int, "skipped_cap": int, "urls": list[str]}.
+    """
+    with get_connection() as conn:
+        existing = {
+            row[0]
+            for row in conn.execute(
+                "SELECT url FROM donors WHERE task_id = ?", (task_id,)
+            ).fetchall()
+        }
+        unique_new: list[str] = []
+        skipped_dup = 0
+        seen: set[str] = set()
+        for url in urls:
+            if url in existing or url in seen:
+                skipped_dup += 1
+                continue
+            seen.add(url)
+            unique_new.append(url)
+
+        remaining = max(0, max_total - len(existing))
+        skipped_cap = max(0, len(unique_new) - remaining)
+        to_insert = unique_new[:remaining]
+        if to_insert:
+            conn.executemany(
+                "INSERT INTO donors (task_id, url) VALUES (?, ?)",
+                [(task_id, url) for url in to_insert],
+            )
+        return {
+            "added": len(to_insert),
+            "skipped_dup": skipped_dup,
+            "skipped_cap": skipped_cap,
+            "urls": to_insert,
+        }
+
+
 def get_donors_for_task(task_id: int) -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
@@ -205,6 +272,15 @@ def get_failed_donors_for_task(task_id: int) -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
             "SELECT * FROM donors WHERE task_id = ? AND status = 'not_loaded' ORDER BY id",
+            (task_id,),
+        ).fetchall()
+
+
+def get_pending_donors_for_task(task_id: int) -> list[sqlite3.Row]:
+    """Return donors that have not been checked yet (status = 'pending')."""
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM donors WHERE task_id = ? AND status = 'pending' ORDER BY id",
             (task_id,),
         ).fetchall()
 

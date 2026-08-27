@@ -362,6 +362,7 @@ class TaskListView(QWidget):
         menu = QMenu(self)
         act_retry        = menu.addAction("Повторить проверку")
         act_retry_failed = menu.addAction("Повторить неудачные")
+        act_add_links    = menu.addAction("Добавить ссылки")
         act_clone        = menu.addAction("Дублировать задание")
         act_export       = menu.addAction("Экспортировать в .xlsx")
         menu.addSeparator()
@@ -372,6 +373,8 @@ class TaskListView(QWidget):
             self._app.retry_task(task_id)
         elif action == act_retry_failed and self._app:
             self._app.retry_failed_task(task_id)
+        elif action == act_add_links and self._app:
+            self._app.edit_task(task_id)
         elif action == act_clone and self._app:
             self._app.clone_task(task_id)
         elif action == act_export and self._app:

@@ -4,7 +4,6 @@ Screen 2: Create task form.
 
 import json
 import logging
-import re
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -26,11 +25,10 @@ from PyQt6.QtWidgets import (
 
 from db import database as db
 from gui.icons import OrDivider
+from utils.url_utils import MAX_DONORS, parse_donor_lines
 from utils.user_agents import PROFILES
 
 logger = logging.getLogger(__name__)
-
-URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
 def _circle_label(n: str) -> QLabel:
@@ -49,6 +47,8 @@ class TaskCreateView(QWidget):
         super().__init__(parent)
         self._app = None
         self._skip_confirmed = False
+        self._edit_task_id: int | None = None
+        self._existing_count = 0
         self._build_ui()
 
     def set_app(self, app):
@@ -75,9 +75,9 @@ class TaskCreateView(QWidget):
         back_btn.clicked.connect(self._go_back)
         header.addWidget(back_btn)
         header.addStretch()
-        lbl = QLabel("Создать задание")
-        lbl.setObjectName("heading")
-        header.addWidget(lbl)
+        self._heading_lbl = QLabel("Создать задание")
+        self._heading_lbl.setObjectName("heading")
+        header.addWidget(self._heading_lbl)
         header.addStretch()
         root.addLayout(header)
 
@@ -89,6 +89,11 @@ class TaskCreateView(QWidget):
 
         # Section 2: donors
         root.addLayout(self._section(2, "Обратные ссылки (доноры) *"))
+        self._existing_lbl = QLabel("")
+        self._existing_lbl.setObjectName("secondary")
+        self._existing_lbl.setWordWrap(True)
+        self._existing_lbl.setVisible(False)
+        root.addWidget(self._existing_lbl)
         self._donors_edit = QPlainTextEdit()
         self._donors_edit.setPlaceholderText(
             "https://example.com/products/item-123\nhttps://test-site.org/blog/article-title\n..."
@@ -97,9 +102,11 @@ class TaskCreateView(QWidget):
         self._donors_edit.textChanged.connect(self._on_donors_changed)
         root.addWidget(self._donors_edit)
 
-        hint1 = QLabel("Введите ссылки, разделяя их переносами строк  •  До 100 000 ссылок")
-        hint1.setObjectName("secondary")
-        root.addWidget(hint1)
+        self._donors_hint = QLabel(
+            "Введите ссылки, разделяя их переносами строк  •  До 100 000 ссылок"
+        )
+        self._donors_hint.setObjectName("secondary")
+        root.addWidget(self._donors_hint)
 
         root.addWidget(OrDivider())
 
@@ -180,11 +187,11 @@ class TaskCreateView(QWidget):
         self._warn_lbl.setVisible(False)
         root.addWidget(self._warn_lbl)
 
-        # Create button
-        btn_create = QPushButton("Создать")
-        btn_create.setObjectName("btnCreate")
-        btn_create.clicked.connect(self._submit)
-        root.addWidget(btn_create)
+        # Create / append button
+        self._submit_btn = QPushButton("Создать")
+        self._submit_btn.setObjectName("btnCreate")
+        self._submit_btn.clicked.connect(self._submit)
+        root.addWidget(self._submit_btn)
 
         root.addStretch()
         scroll.setWidget(container)
@@ -229,16 +236,19 @@ class TaskCreateView(QWidget):
         self._warn_lbl.setVisible(False)
 
         name = self._name_edit.text().strip() or "Задание"
+        is_append = self._edit_task_id is not None
+        remaining = (
+            max(0, MAX_DONORS - self._existing_count) if is_append else MAX_DONORS
+        )
 
-        # Parse & deduplicate donors (cap at 100 000)
-        raw_donors = [
-            u.strip() for u in self._donors_edit.toPlainText().splitlines()
-            if u.strip()
-        ]
-        invalid_count = sum(1 for u in raw_donors if not URL_RE.match(u))
-        valid_donors = list(dict.fromkeys(
-            u for u in raw_donors if URL_RE.match(u)
-        ))[:100_000]
+        if is_append and remaining == 0:
+            self._error_lbl.setText("Достигнут лимит 100 000 доноров в задании.")
+            self._error_lbl.setVisible(True)
+            return
+
+        valid_donors, invalid_count = parse_donor_lines(
+            self._donors_edit.toPlainText(), limit=remaining
+        )
 
         # Parse & deduplicate targets (cap at 50)
         raw_targets = [
@@ -267,10 +277,12 @@ class TaskCreateView(QWidget):
 
         # Warn about skipped URLs; require a second click to confirm
         if invalid_count > 0 and not self._skip_confirmed:
+            action = "добавлено" if is_append else "создано"
+            btn_label = "«Добавить и проверить»" if is_append else "«Создать»"
             self._warn_lbl.setText(
                 f"⚠  {invalid_count} URL пропущено — нет схемы http:// или https://. "
-                f"Задание будет создано с {len(valid_donors)} донором(ами). "
-                "Нажмите «Создать» ещё раз для подтверждения."
+                f"Задание будет {action} с {len(valid_donors)} донором(ами). "
+                f"Нажмите {btn_label} ещё раз для подтверждения."
             )
             self._warn_lbl.setVisible(True)
             self._skip_confirmed = True
@@ -282,40 +294,111 @@ class TaskCreateView(QWidget):
         timeout = self._timeout_spin.value()
 
         try:
-            task_id = db.create_task(
-                name=name,
-                target_domains=targets,
-                user_agent=ua_preset,
-                custom_user_agent=custom_ua,
-                threads=threads,
-                timeout=timeout,
+            if is_append:
+                task_id = self._edit_task_id
+                if task_id is None:
+                    return
+                db.update_task_fields(
+                    task_id,
+                    name=name,
+                    user_agent=ua_preset,
+                    custom_user_agent=custom_ua,
+                    threads=threads,
+                    timeout=timeout,
+                )
+                result = db.add_donors_to_task(task_id, valid_donors)
+                if result["added"] == 0:
+                    self._error_lbl.setText(
+                        "Все указанные ссылки уже есть в задании."
+                    )
+                    self._error_lbl.setVisible(True)
+                    return
+            else:
+                task_id = db.create_task(
+                    name=name,
+                    target_domains=targets,
+                    user_agent=ua_preset,
+                    custom_user_agent=custom_ua,
+                    threads=threads,
+                    timeout=timeout,
+                )
+                db.create_donors_bulk(task_id, valid_donors)
+        except Exception:
+            logger.exception("Failed to save task")
+            self._error_lbl.setText(
+                "Ошибка сохранения задания. Подробности — в лог-файле."
             )
-            db.create_donors_bulk(task_id, valid_donors)
-        except Exception as exc:
-            logger.exception("Failed to create task: %s", exc)
-            self._error_lbl.setText("Ошибка сохранения задания. Подробности — в лог-файле.")
             self._error_lbl.setVisible(True)
             return
 
         if self._app:
             self._app.start_task(task_id)
-            self._app.show_list()
+            if is_append:
+                self._app.show_report(task_id)
+            else:
+                self._app.show_list()
 
     def _go_back(self):
         if self._app:
             self._app.show_list()
 
     def reset(self):
+        self._edit_task_id = None
+        self._existing_count = 0
         self._name_edit.clear()
         self._donors_edit.clear()
         self._targets_edit.clear()
+        self._targets_edit.setReadOnly(False)
         self._custom_ua_edit.clear()
         self._ua_combo.setCurrentIndex(0)
         self._threads_spin.setValue(5)
         self._timeout_spin.setValue(30)
         self._error_lbl.setVisible(False)
         self._warn_lbl.setVisible(False)
+        self._existing_lbl.setVisible(False)
+        self._existing_lbl.clear()
+        self._heading_lbl.setText("Создать задание")
+        self._submit_btn.setText("Создать")
+        self._donors_hint.setText(
+            "Введите ссылки, разделяя их переносами строк  •  До 100 000 ссылок"
+        )
         self._skip_confirmed = False
+
+    def enter_append_mode(self, task, existing_count: int) -> None:
+        """Switch the form to add new donor URLs to an existing task."""
+        self.reset()
+        self._edit_task_id = int(task["id"])
+        self._existing_count = existing_count
+        remaining = max(0, MAX_DONORS - existing_count)
+
+        self._heading_lbl.setText("Добавить ссылки")
+        self._submit_btn.setText("Добавить и проверить")
+        self._name_edit.setText(task["name"])
+        self._existing_lbl.setText(
+            f"В задании уже {existing_count} донор(ов). "
+            "Новые ссылки проверятся по тем же целевым доменам. "
+            "Уже проверенные не будут перезапущены."
+        )
+        self._existing_lbl.setVisible(True)
+        self._donors_hint.setText(
+            "Вставьте новые ссылки, по одной на строку  •  "
+            f"Можно добавить ещё {remaining}"
+        )
+
+        targets = json.loads(task["target_domains"])
+        self._targets_edit.setPlainText("\n".join(targets))
+        self._targets_edit.setReadOnly(True)
+
+        ua = task["user_agent"] or "desktop_chrome"
+        for i in range(self._ua_combo.count()):
+            if self._ua_combo.itemData(i) == ua:
+                self._ua_combo.setCurrentIndex(i)
+                break
+        custom = task["custom_user_agent"] or ""
+        if custom:
+            self._custom_ua_edit.setText(custom)
+        self._threads_spin.setValue(task["threads"])
+        self._timeout_spin.setValue(task["timeout"])
 
     def prefill(self, task, donors: list) -> None:
         """Pre-fill the form with data from an existing task for cloning."""
