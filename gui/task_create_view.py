@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -174,6 +175,13 @@ class TaskCreateView(QWidget):
 
         root.addWidget(settings_box)
 
+        self._index_check = QCheckBox("Проверка индексации ссылок")
+        self._index_check.setToolTip(
+            "Проверить в Google только доноров, у которых найден бэклинк. "
+            "Нужен URL XMLRiver или XMLStock в Настройках."
+        )
+        root.addWidget(self._index_check)
+
         # Validation error label
         self._error_lbl = QLabel("")
         self._error_lbl.setStyleSheet("color: #ff5252;")
@@ -292,6 +300,7 @@ class TaskCreateView(QWidget):
 
         threads = self._threads_spin.value()
         timeout = self._timeout_spin.value()
+        check_index = self._index_check.isChecked()
 
         try:
             if is_append:
@@ -305,6 +314,7 @@ class TaskCreateView(QWidget):
                     custom_user_agent=custom_ua,
                     threads=threads,
                     timeout=timeout,
+                    check_google_index=1 if check_index else 0,
                 )
                 result = db.add_donors_to_task(task_id, valid_donors)
                 if result["added"] == 0:
@@ -321,6 +331,7 @@ class TaskCreateView(QWidget):
                     custom_user_agent=custom_ua,
                     threads=threads,
                     timeout=timeout,
+                    check_google_index=check_index,
                 )
                 db.create_donors_bulk(task_id, valid_donors)
         except Exception:
@@ -353,6 +364,7 @@ class TaskCreateView(QWidget):
         self._ua_combo.setCurrentIndex(0)
         self._threads_spin.setValue(5)
         self._timeout_spin.setValue(30)
+        self._index_check.setChecked(False)
         self._error_lbl.setVisible(False)
         self._warn_lbl.setVisible(False)
         self._existing_lbl.setVisible(False)
@@ -399,6 +411,10 @@ class TaskCreateView(QWidget):
             self._custom_ua_edit.setText(custom)
         self._threads_spin.setValue(task["threads"])
         self._timeout_spin.setValue(task["timeout"])
+        try:
+            self._index_check.setChecked(bool(task["check_google_index"]))
+        except (KeyError, IndexError):
+            self._index_check.setChecked(False)
 
     def prefill(self, task, donors: list) -> None:
         """Pre-fill the form with data from an existing task for cloning."""
@@ -416,3 +432,7 @@ class TaskCreateView(QWidget):
             self._custom_ua_edit.setText(custom)
         self._threads_spin.setValue(task["threads"])
         self._timeout_spin.setValue(task["timeout"])
+        try:
+            self._index_check.setChecked(bool(task["check_google_index"]))
+        except (KeyError, IndexError):
+            self._index_check.setChecked(False)

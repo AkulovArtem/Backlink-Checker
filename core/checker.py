@@ -11,6 +11,7 @@ from playwright.async_api import Error as PWError
 from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
 
+from core.google_index import INDEX_CONCURRENCY, check_url_indexed
 from core.indexability import check_indexability
 from core.models import CheckConfig, DonorResult
 from core.parser import parse_page
@@ -144,6 +145,7 @@ async def run_check(
     """
     profile = get_profile(config.user_agent_preset, config.custom_user_agent)
     semaphore = asyncio.Semaphore(config.threads)
+    index_sem = asyncio.Semaphore(INDEX_CONCURRENCY)
     total = len(config.donor_urls)
     done_count = 0
     lock = asyncio.Lock()
@@ -178,6 +180,18 @@ async def run_check(
                         donor_id=donor_id, url=url,
                         status="not_loaded", error_code="UNKNOWN",
                     )
+
+                if (
+                    config.check_google_index
+                    and config.index_provider is not None
+                    and donor_result.status == "found"
+                ):
+                    async with index_sem:
+                        idx = await asyncio.to_thread(
+                            check_url_indexed, donor_result.url, config.index_provider
+                        )
+                    donor_result.google_indexed = idx.status
+                    donor_result.google_index_error = idx.error or None
 
                 try:
                     result_callback(donor_result)

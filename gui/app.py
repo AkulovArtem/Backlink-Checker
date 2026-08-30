@@ -5,7 +5,7 @@ Main application window — routes between the three screens.
 import json
 import logging
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -17,8 +17,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core.google_index import (
+    PROVIDER_RIVER,
+    PROVIDER_STOCK,
+    fetch_balance,
+    pick_provider,
+)
 from core.models import CheckConfig
 from db import database as db
+from gui.settings_dialog import SETTING_RIVER_URL, SETTING_STOCK_URL
 from export.excel_export import export_to_excel
 from gui.constants import APP_VERSION
 from gui.report_view import ReportView
@@ -119,6 +126,22 @@ class MainApp(QMainWindow):
             logger.error("Corrupted target_domains for task %d", task_id)
             return
 
+        check_index = False
+        try:
+            check_index = bool(task["check_google_index"])
+        except (KeyError, IndexError):
+            check_index = False
+
+        provider = None
+        if check_index:
+            provider, notices = self._resolve_index_provider()
+            if notices:
+                QMessageBox.warning(
+                    self, "Проверка индексации", "\n\n".join(notices)
+                )
+            if provider is None:
+                check_index = False
+
         config = CheckConfig(
             task_id=task_id,
             donor_urls=[(int(d["id"]), str(d["url"])) for d in donors],
@@ -127,12 +150,25 @@ class MainApp(QMainWindow):
             custom_user_agent=task["custom_user_agent"] or "",
             threads=task["threads"],
             timeout=task["timeout"],
+            check_google_index=check_index,
+            index_provider=provider,
         )
 
         worker = CheckWorker(config)
         self._workers[task_id] = worker
         self._wire_worker(worker, task_id)
         logger.info("Task %d started (%d pending donor(s))", task_id, len(donors))
+
+    def _resolve_index_provider(self):
+        river_url = db.get_setting(SETTING_RIVER_URL, "")
+        stock_url = db.get_setting(SETTING_STOCK_URL, "")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            river_bal = fetch_balance(PROVIDER_RIVER, river_url) if river_url else None
+            stock_bal = fetch_balance(PROVIDER_STOCK, stock_url) if stock_url else None
+        finally:
+            QApplication.restoreOverrideCursor()
+        return pick_provider(river_url, river_bal, stock_url, stock_bal)
 
     # ── Worker lifecycle helpers ──────────────────────────────────────────
 

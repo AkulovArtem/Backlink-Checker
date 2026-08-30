@@ -597,14 +597,21 @@ class ReportView(QWidget):
         layout.addLayout(filter_row)
 
         # Table
-        self._donor_table = QTableWidget(0, 5)
+        self._donor_table = QTableWidget(0, 6)
         self._donor_table.setHorizontalHeaderLabels(
-            ["ССЫЛКА-ДОНОР", "В ИНДЕКСЕ", "ССЫЛКИ НА ЦЕЛЕВОЙ ДОМЕН", "ВН. ССЫЛОК", "ВНШ. ССЫЛОК"]
+            [
+                "ССЫЛКА-ДОНОР",
+                "ROBOTS",
+                "В GOOGLE",
+                "ССЫЛКИ НА ЦЕЛЕВОЙ ДОМЕН",
+                "ВН. ССЫЛОК",
+                "ВНШ. ССЫЛОК",
+            ]
         )
         _hh = self._donor_table.horizontalHeader()
         if _hh:
             _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            _hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            _hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._donor_table.setAlternatingRowColors(True)
         self._donor_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         _vh = self._donor_table.verticalHeader()
@@ -678,7 +685,30 @@ class ReportView(QWidget):
             idx_item.setForeground(QColor(idx_color))
             self._donor_table.setItem(row, 1, idx_item)
 
-            # Column 2: backlinks found
+            g_val = None
+            try:
+                g_val = donor["google_indexed"]
+            except (KeyError, IndexError):
+                g_val = None
+            if g_val == "indexed":
+                g_text, g_color = "Да", "#00c853"
+            elif g_val == "not_indexed":
+                g_text, g_color = "Нет", "#ff5252"
+            elif g_val == "error":
+                g_text, g_color = "Ошибка", "#ffa726"
+            else:
+                g_text, g_color = "—", "#888888"
+            g_item = QTableWidgetItem(g_text)
+            g_item.setForeground(QColor(g_color))
+            try:
+                err = donor["google_index_error"]
+                if err:
+                    g_item.setToolTip(str(err))
+            except (KeyError, IndexError):
+                pass
+            self._donor_table.setItem(row, 2, g_item)
+
+            # Column 3: backlinks found
             if donor_bls:
                 bls_text = "\n".join(
                     f"{bl['target_url']}  [{bl['rel_type']}]  «{bl['anchor_text'] or '—'}»"
@@ -688,13 +718,15 @@ class ReportView(QWidget):
                 bls_text = "—"
             bl_item = QTableWidgetItem(bls_text)
             bl_item.setToolTip(bls_text)
-            self._donor_table.setItem(row, 2, bl_item)
+            self._donor_table.setItem(row, 3, bl_item)
 
-            # Column 3-4: link counts (donor URL stored in col-3 UserRole for context menu)
+            # Column 4-5: link counts (donor URL stored in col-4 UserRole for context menu)
             int_item = QTableWidgetItem(str(donor["internal_links"] or 0))
             int_item.setData(Qt.ItemDataRole.UserRole, donor["url"])
-            self._donor_table.setItem(row, 3, int_item)
-            self._donor_table.setItem(row, 4, QTableWidgetItem(str(donor["external_links"] or 0)))
+            self._donor_table.setItem(row, 4, int_item)
+            self._donor_table.setItem(
+                row, 5, QTableWidgetItem(str(donor["external_links"] or 0))
+            )
 
             self._donor_table.setRowHeight(row, max(60, 24 * max(len(donor_bls), 1)))
 
@@ -955,7 +987,7 @@ class ReportView(QWidget):
         row = self._donor_table.rowAt(pos.y())
         if row < 0:
             return
-        item = self._donor_table.item(row, 3)
+        item = self._donor_table.item(row, 4)
         url = item.data(Qt.ItemDataRole.UserRole) if item else ""
         if not url:
             return

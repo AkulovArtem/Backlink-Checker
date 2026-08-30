@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from core.google_index import IndexProvider
 
 
 @dataclass
@@ -35,6 +38,8 @@ class DonorResult:
     backlinks: list[BacklinkInfo] = field(default_factory=list)
     status: str = "pending"   # pending | found | not_found | not_loaded
     error_code: Optional[str] = None
+    google_indexed: Optional[str] = None  # indexed | not_indexed | error
+    google_index_error: Optional[str] = None
 
 
 @dataclass
@@ -46,3 +51,5 @@ class CheckConfig:
     custom_user_agent: str = ""
     threads: int = 5
     timeout: int = 30   # seconds
+    check_google_index: bool = False
+    index_provider: Optional["IndexProvider"] = None
