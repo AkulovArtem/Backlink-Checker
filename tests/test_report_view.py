@@ -9,7 +9,12 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel
 
 from db import database as db
-from gui.report_view import ReportView, matches_google_filter, matches_robots_filter
+from gui.report_view import (
+    ReportView,
+    donor_url_html,
+    matches_google_filter,
+    matches_robots_filter,
+)
 
 
 class ReportViewLoadTest(unittest.TestCase):
@@ -220,6 +225,19 @@ class ReportViewLoadTest(unittest.TestCase):
         view._switch_se("yandex")
         self.assertEqual(view._donor_table.rowCount(), 1)
         self.assertEqual(view._donor_table.item(0, 2).text(), "Ошибка")
+
+
+class DonorUrlHtmlTest(unittest.TestCase):
+    def test_ampersand_in_query_is_escaped(self):
+        html = donor_url_html("https://ex.com/x?a=1&b=2", "200", "#00c853")
+        self.assertIn("&amp;", html)
+        self.assertNotIn('href="https://ex.com/x?a=1&b=2"', html)
+        self.assertIn("https://ex.com/x?a=1&amp;b=2", html)
+
+    def test_quotes_in_url_are_escaped(self):
+        html = donor_url_html('https://ex.com/"x"', "200", "#00c853")
+        self.assertIn("&quot;", html)
+        self.assertNotIn('href="https://ex.com/"x""', html)
 
 
 class MatchesGoogleFilterTest(unittest.TestCase):
