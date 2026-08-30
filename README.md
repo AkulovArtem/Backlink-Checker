@@ -7,7 +7,7 @@
 Сайт: [artemakulov.ru/backlink-checker](https://artemakulov.ru/backlink-checker/)  
 Telegram: [t.me/akulov_pro](https://t.me/akulov_pro)  
 Скачать для Windows x64: [BacklinkChecker.exe](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.5.1/BacklinkChecker.exe)  
-Скачать для macOS (Apple Silicon): [BacklinkChecker-1.5.1-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.5.1/BacklinkChecker-1.5.1-macos-arm64.dmg)
+Скачать для macOS (Apple Silicon, M1–M6): [BacklinkChecker-1.5.1-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.5.1/BacklinkChecker-1.5.1-macos-arm64.dmg)
 
 ## Для кого
 
@@ -83,7 +83,7 @@ HTTP-статус, title, HTML-сниппет страницы, число вн�
 
 ## Системные требования
 
-- Windows 10 / 11, 64-bit **или** macOS 12+ на Apple Silicon (M1 и новее)
+- Windows 10 / 11, 64-bit **или** macOS 12+ на Apple Silicon (процессоры M1, M2, M3, M4, M5, M6)
 - от 4 GB RAM (лучше 8+ GB при большом числе потоков)
 - установка не нужна: Windows — один exe, macOS — `.app` из DMG
 - Chromium внутри программы, отдельно ставить браузер не нужно
@@ -112,7 +112,7 @@ build.bat
 
 Либо GitHub Actions: **Actions → Build Windows EXE → Run workflow**. Артефакт: `BacklinkChecker.exe`.
 
-macOS DMG (только Apple Silicon):
+macOS DMG (Apple Silicon, M1–M6):
 
 ```bash
 ./build_macos.sh
