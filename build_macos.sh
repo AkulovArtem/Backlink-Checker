@@ -87,7 +87,7 @@ trap cleanup EXIT
 ditto "$APP_PATH" "${STAGE}/${APP_NAME}.app"
 ln -s /Applications "${STAGE}/Applications"
 cat > "${STAGE}/Как открыть.txt" <<EOF
-Backlink Checker ${VERSION} для Apple Silicon (M1 / M2 / M3 / M4)
+Backlink Checker ${VERSION} для Apple Silicon (M1 / M2 / M3 / M4 / M5 / M6)
 
 1. Перетащите Backlink Checker в папку Программы.
 2. При первом запуске: правый клик по приложению → Открыть → Открыть.
