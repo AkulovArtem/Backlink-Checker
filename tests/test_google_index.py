@@ -275,6 +275,7 @@ class RequestUrlTest(unittest.TestCase):
         self.assertIn("inindex=1", url)
         self.assertIn("strict=1", url)
         self.assertIn("query=", url)
+        self.assertIn("groupby=10", url)
 
     def test_stock_site_query(self):
         p = IndexProvider(
@@ -286,7 +287,17 @@ class RequestUrlTest(unittest.TestCase):
         self.assertNotIn("https%3A", url.split("query=")[1])
         self.assertIn("id%3D1", url)
         self.assertIn("nfpr=1", url)
+        self.assertIn("groupby=10", url)
         self.assertEqual(site_query_target("https://www.wikipedia.org/"), "www.wikipedia.org")
+
+    def test_groupby_10_overrides_account_top100(self):
+        p = IndexProvider(
+            PROVIDER_RIVER,
+            "http://xmlriver.com/search/xml?user=1&key=a&groupby=100",
+        )
+        url = build_index_request_url(p, "https://ex.com/x")
+        self.assertIn("groupby=10", url)
+        self.assertNotIn("groupby=100", url)
 
     def test_canonical_stock_path(self):
         ep = canonical_search_endpoint(

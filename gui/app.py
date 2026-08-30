@@ -34,6 +34,7 @@ from core.task_start import (
 )
 from db import database as db
 from export.excel_export import export_to_excel
+from gui.confirm import ask_confirm
 from gui.constants import APP_VERSION
 from gui.report_view import ReportView
 from gui.settings_dialog import SETTING_RIVER_URL, SETTING_STOCK_URL
@@ -401,15 +402,24 @@ class MainApp(QMainWindow):
     def confirm_and_delete_task(self, task_id: int, parent) -> None:
         task = db.get_task(task_id)
         name = task["name"] if task else f"#{task_id}"
-        reply = QMessageBox.question(
+        if ask_confirm(
             parent,
             "Удалить задание",
-            f"Удалить задание «{name}»?\n\nВсе доноры и бэклинки будут удалены безвозвратно.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
+            f"Удалить задание «{name}»?\n\n"
+            "Все доноры и бэклинки будут удалены безвозвратно.",
+        ):
             self.delete_task(task_id)
+
+    def wipe_check_data(self) -> None:
+        """Stop all checks and delete every task. Settings are kept."""
+        for task_id in list(self._starting):
+            self._cancel_start(task_id)
+        for task_id in list(self._workers):
+            self._stop_and_reap_worker(task_id)
+        db.wipe_check_data()
+        self._report_view._task_id = None
+        self.show_list()
+        logger.info("All tasks wiped")
 
     def export_task(self, task_id: int):
         path, _ = QFileDialog.getSaveFileName(

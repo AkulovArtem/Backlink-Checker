@@ -386,11 +386,15 @@ def build_index_request_url(provider: IndexProvider, page_url: str) -> str:
     if provider.name == PROVIDER_RIVER:
         return _with_query(
             provider.endpoint,
-            {"query": page_url, "inindex": "1", "strict": "1"},
+            {"query": page_url, "inindex": "1", "strict": "1", "groupby": "10"},
         )
     return _with_query(
         provider.endpoint,
-        {"query": f"site:{site_query_target(page_url)}", "nfpr": "1"},
+        {
+            "query": f"site:{site_query_target(page_url)}",
+            "nfpr": "1",
+            "groupby": "10",
+        },
     )
 
 
