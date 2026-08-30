@@ -16,6 +16,11 @@ from db import database as db
 logger = logging.getLogger(__name__)
 
 
+def loop_accepts_stop(loop) -> bool:
+    """True if call_soon_threadsafe is safe on this event loop."""
+    return loop is not None and loop.is_running()
+
+
 class CheckWorker(QThread):
     # Signals
     donor_done = pyqtSignal(object)          # DonorResult
@@ -27,6 +32,7 @@ class CheckWorker(QThread):
         self._config = config
         self._stop_event: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_requested = False
 
     def run(self):
         # ProactorEventLoop is required on Windows for subprocess support (Playwright).
@@ -36,10 +42,20 @@ class CheckWorker(QThread):
             self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._stop_event = asyncio.Event()
+        if self._stop_requested:
+            self._stop_event.set()
+            try:
+                db.update_task_status(self._config.task_id, "pending", 0)
+                self.finished.emit(False)
+            finally:
+                self._loop.close()
+            return
 
         db.update_task_status(self._config.task_id, "running", 0)
 
         try:
+            if self._stop_requested:
+                self._stop_event.set()
             self._loop.run_until_complete(
                 run_check(
                     config=self._config,
@@ -62,7 +78,8 @@ class CheckWorker(QThread):
             self._loop.close()
 
     def stop(self):
-        if self._stop_event and self._loop:
+        self._stop_requested = True
+        if self._stop_event is not None and loop_accepts_stop(self._loop):
             self._loop.call_soon_threadsafe(self._stop_event.set)
 
     # ── Callbacks (called from async context, safe to emit) ───────────────
@@ -70,8 +87,7 @@ class CheckWorker(QThread):
     def _on_donor_result(self, result: DonorResult):
         # Persist to DB — isolated so a DB error never suppresses the UI signal
         try:
-            db.update_donor(
-                result.donor_id,
+            persist = dict(
                 http_status=result.http_status,
                 title=result.title,
                 canonical_url=result.canonical_url,
@@ -85,7 +101,12 @@ class CheckWorker(QThread):
                 x_robots_tag=result.indexability.x_robots_tag,
                 status=result.status,
                 error_code=result.error_code,
+                html_snippet=result.html_snippet or None,
             )
+            if result.google_indexed is not None:
+                persist["google_indexed"] = result.google_indexed
+                persist["google_index_error"] = result.google_index_error
+            db.update_donor(result.donor_id, **persist)
             db.create_backlinks_bulk(result.donor_id, self._config.task_id, result.backlinks)
         except Exception:
             logger.exception("DB persist error for donor %d (%s)", result.donor_id, result.url)

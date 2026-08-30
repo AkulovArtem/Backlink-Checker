@@ -2,14 +2,32 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Optional, TypedDict
 
 from utils.resource_path import data_path
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = data_path("backlink_checker.db")
+
+
+def format_task_created(created_iso: str) -> str:
+    """SQLite CURRENT_TIMESTAMP is UTC without tzinfo; show local wall time."""
+    try:
+        dt = datetime.fromisoformat(str(created_iso))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(created_iso)
+
+
+class AddDonorsResult(TypedDict):
+    added: int
+    skipped_dup: int
+    skipped_cap: int
+    urls: list[str]
 
 
 @contextmanager
@@ -94,20 +112,40 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_backlinks_donor_id
                 ON backlinks(donor_id);
         """)
+        _add_column_if_missing(
+            conn, "tasks", "check_google_index", "INTEGER DEFAULT 0"
+        )
+        _add_column_if_missing(
+            conn, "tasks", "index_provider", "TEXT DEFAULT ''"
+        )
+        _add_column_if_missing(conn, "donors", "google_indexed", "TEXT")
+        _add_column_if_missing(conn, "donors", "google_index_error", "TEXT")
     logger.info("Database initialized at %s", DB_PATH)
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()  # nosec B608
+    names = {r[1] for r in rows}
+    if column not in names:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")  # nosec B608
 
 
 # ── Tasks ──────────────────────────────────────────────────────────────────
 
 def create_task(name: str, target_domains: list[str], user_agent: str = "desktop_chrome",
                 custom_user_agent: Optional[str] = None, threads: int = 5,
-                timeout: int = 30) -> int:
+                timeout: int = 30, check_google_index: bool = False,
+                index_provider: str = "") -> int:
     with get_connection() as conn:
         cur = conn.execute(
-            """INSERT INTO tasks (name, target_domains, user_agent, custom_user_agent, threads, timeout)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO tasks (name, target_domains, user_agent, custom_user_agent,
+                                  threads, timeout, check_google_index, index_provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (name, json.dumps(target_domains, ensure_ascii=False),
-             user_agent, custom_user_agent, threads, timeout)
+             user_agent, custom_user_agent, threads, timeout,
+             1 if check_google_index else 0, index_provider or "")
         )
         return cur.lastrowid or 0
 
@@ -133,6 +171,14 @@ def get_task(task_id: int) -> Optional[sqlite3.Row]:
         return conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
 
 
+def parse_target_domains(raw) -> list[str]:
+    """Parse tasks.target_domains JSON. Raises if missing or not a list."""
+    domains = json.loads(raw)
+    if not isinstance(domains, list):
+        raise TypeError("target_domains is not a list")
+    return [str(d) for d in domains if d]
+
+
 def update_task_status(task_id: int, status: str, progress: int = 0) -> None:
     with get_connection() as conn:
         conn.execute(
@@ -147,6 +193,25 @@ def delete_task(task_id: int) -> None:
         conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
 
 
+_TASK_FIELDS = frozenset({
+    "name", "user_agent", "custom_user_agent", "threads", "timeout",
+    "check_google_index", "index_provider",
+})
+
+
+def update_task_fields(task_id: int, **kwargs) -> None:
+    """Update allowed task metadata (name, UA, threads, timeout)."""
+    if not kwargs:
+        return
+    invalid = set(kwargs) - _TASK_FIELDS
+    if invalid:
+        raise ValueError(f"Invalid task field(s): {invalid}")
+    fields = ", ".join(f"{k} = ?" for k in kwargs)  # nosec B608
+    values = list(kwargs.values()) + [task_id]
+    with get_connection() as conn:
+        conn.execute(f"UPDATE tasks SET {fields} WHERE id = ?", values)  # nosec B608
+
+
 def reset_task(task_id: int) -> None:
     """Reset task to pending: delete backlinks, reset donor fields (keep URLs)."""
     with get_connection() as conn:
@@ -157,7 +222,8 @@ def reset_task(task_id: int) -> None:
                canonical_url = NULL, internal_links = 0, external_links = 0,
                index_google = NULL, index_yandex = NULL, index_bing = NULL,
                index_baidu = NULL, meta_robots = NULL, x_robots_tag = NULL,
-               error_code = NULL, html_snippet = NULL
+               error_code = NULL, html_snippet = NULL,
+               google_indexed = NULL, google_index_error = NULL
                WHERE task_id = ?""",
             (task_id,)
         )
@@ -193,6 +259,49 @@ def create_donors_bulk(task_id: int, urls: list[str]) -> None:
         )
 
 
+def add_donors_to_task(
+    task_id: int, urls: list[str], max_total: int = 100_000
+) -> AddDonorsResult:
+    """Insert unique new donor URLs into an existing task.
+
+    Existing rows are left untouched (results stay). Duplicates (already in
+    the task or repeated in ``urls``) and URLs past ``max_total`` are skipped.
+
+    Returns {"added": int, "skipped_dup": int, "skipped_cap": int, "urls": list[str]}.
+    """
+    with get_connection() as conn:
+        existing = {
+            row[0]
+            for row in conn.execute(
+                "SELECT url FROM donors WHERE task_id = ?", (task_id,)
+            ).fetchall()
+        }
+        unique_new: list[str] = []
+        skipped_dup = 0
+        seen: set[str] = set()
+        for url in urls:
+            if url in existing or url in seen:
+                skipped_dup += 1
+                continue
+            seen.add(url)
+            unique_new.append(url)
+
+        remaining = max(0, max_total - len(existing))
+        skipped_cap = max(0, len(unique_new) - remaining)
+        to_insert = unique_new[:remaining]
+        if to_insert:
+            conn.executemany(
+                "INSERT INTO donors (task_id, url) VALUES (?, ?)",
+                [(task_id, url) for url in to_insert],
+            )
+        return {
+            "added": len(to_insert),
+            "skipped_dup": skipped_dup,
+            "skipped_cap": skipped_cap,
+            "urls": to_insert,
+        }
+
+
 def get_donors_for_task(task_id: int) -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
@@ -209,6 +318,15 @@ def get_failed_donors_for_task(task_id: int) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def get_pending_donors_for_task(task_id: int) -> list[sqlite3.Row]:
+    """Return donors that have not been checked yet (status = 'pending')."""
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM donors WHERE task_id = ? AND status = 'pending' ORDER BY id",
+            (task_id,),
+        ).fetchall()
+
+
 def reset_failed_donors(task_id: int) -> None:
     """Reset only not_loaded donors to pending; leaves found/not_found rows intact."""
     with get_connection() as conn:
@@ -218,7 +336,8 @@ def reset_failed_donors(task_id: int) -> None:
                canonical_url = NULL, internal_links = 0, external_links = 0,
                index_google = NULL, index_yandex = NULL, index_bing = NULL,
                index_baidu = NULL, meta_robots = NULL, x_robots_tag = NULL,
-               error_code = NULL, html_snippet = NULL
+               error_code = NULL, html_snippet = NULL,
+               google_indexed = NULL, google_index_error = NULL
                WHERE task_id = ? AND status = 'not_loaded'""",
             (task_id,),
         )
@@ -228,6 +347,7 @@ _DONOR_COLUMNS = frozenset({
     "http_status", "title", "canonical_url", "internal_links", "external_links",
     "index_google", "index_yandex", "index_bing", "index_baidu",
     "meta_robots", "x_robots_tag", "status", "error_code", "html_snippet",
+    "google_indexed", "google_index_error",
 })
 
 

@@ -39,6 +39,14 @@ def _extract_anchor(tag) -> tuple[str, str]:
     return title, "text"
 
 
+def _rel_tokens(tag) -> set[str]:
+    """HTML rel is case-insensitive and may be a list or a string."""
+    rel_raw = tag.get("rel") or []
+    if isinstance(rel_raw, str):
+        rel_raw = rel_raw.replace(",", " ").split()
+    return {str(v).lower() for v in rel_raw}
+
+
 def _get_rel_type(tag, page_nofollow: bool) -> str:
     """
     Determine rel type for a single <a> tag.
@@ -46,7 +54,7 @@ def _get_rel_type(tag, page_nofollow: bool) -> str:
     """
     if page_nofollow:
         return "nofollow"
-    rel_values = set(tag.get("rel") or [])
+    rel_values = _rel_tokens(tag)
     for val in ("sponsored", "ugc", "nofollow"):
         if val in rel_values:
             return val
@@ -112,10 +120,15 @@ def parse_page(html: str, page_url: str, target_domains: list[str]) -> dict:
     title_tag = soup.find("title")
     title = title_tag.get_text(strip=True) if title_tag else ""
 
-    # Canonical
-    canonical_tag = soup.find("link", rel="canonical")
-    canonical_href = canonical_tag.get("href") if canonical_tag else None
-    canonical_url = str(canonical_href).strip() if canonical_href else None
+    # Canonical (rel is case-insensitive in HTML)
+    canonical_url = None
+    for tag in soup.find_all("link"):
+        if "canonical" not in _rel_tokens(tag):
+            continue
+        href = tag.get("href")
+        if href:
+            canonical_url = str(href).strip()
+            break
 
     # Check page-level nofollow (meta robots)
     page_nofollow = False

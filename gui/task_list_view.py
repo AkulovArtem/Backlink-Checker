@@ -2,7 +2,6 @@
 Screen 1: Task list with search, date filters, sortable table, context menu.
 """
 
-import logging
 from datetime import datetime
 
 from PyQt6.QtCore import QDate, QSortFilterProxyModel, Qt, QUrl
@@ -35,8 +34,6 @@ from PyQt6.QtWidgets import (
 from db import database as db
 from gui.constants import STATUS_COLORS, STATUS_LABELS
 from gui.theme_toggle import ThemeToggle
-
-logger = logging.getLogger(__name__)
 
 COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
 
@@ -151,24 +148,35 @@ class TaskListView(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(16)
 
-        # Action bar: tg btn (left) — stretch — create btn + toggle (right)
+        # Action bar: support (left) — create (true center) — settings + theme (right)
         action_bar = QHBoxLayout()
+        left = QHBoxLayout()
         tg_btn = QPushButton("Поддержка и обновления")
-        tg_btn.setObjectName("btnTelegram")
-        tg_btn.setFixedHeight(30)
+        tg_btn.setObjectName("btnCreate")
         tg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         tg_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl("https://t.me/akulov_pro"))
         )
-        action_bar.addWidget(tg_btn)
-        action_bar.addStretch()
+        left.addWidget(tg_btn)
+        left.addStretch()
+
         btn_create = QPushButton("+ Создать задание")
         btn_create.setObjectName("btnCreate")
         btn_create.clicked.connect(self._go_create)
-        action_bar.addWidget(btn_create)
-        action_bar.addSpacing(12)
+
+        right = QHBoxLayout()
+        right.addStretch()
+        btn_settings = QPushButton("Настройки")
+        btn_settings.setObjectName("btnCreate")
+        btn_settings.clicked.connect(self._open_settings)
+        right.addWidget(btn_settings)
+        right.addSpacing(12)
         self._theme_btn = ThemeToggle(self._dark_mode)
-        action_bar.addWidget(self._theme_btn)
+        right.addWidget(self._theme_btn)
+
+        action_bar.addLayout(left, 1)
+        action_bar.addWidget(btn_create, 0, Qt.AlignmentFlag.AlignCenter)
+        action_bar.addLayout(right, 1)
         root.addLayout(action_bar)
 
         # Heading
@@ -207,7 +215,7 @@ class TaskListView(QWidget):
         # Table
         self._model = QStandardItemModel(0, 6, self)
         self._model.setHorizontalHeaderLabels(
-            ["СОЗДАНО", "НАЗВАНИЕ", "ДОНОРОВ", "БЕКЛИНКОВ", "СТАТУС", "ДЕЙСТВИЯ"]
+            ["СОЗДАНО", "НАЗВАНИЕ", "ДОНОРОВ", "БЭКЛИНКОВ", "СТАТУС", "ДЕЙСТВИЯ"]
         )
 
         self._proxy = _TaskFilterProxy(self)
@@ -253,11 +261,7 @@ class TaskListView(QWidget):
 
             # Format created_at
             created_iso = task["created_at"]
-            try:
-                dt = datetime.fromisoformat(created_iso)
-                created_str = dt.strftime("%d.%m.%Y %H:%M")
-            except Exception:
-                created_str = created_iso
+            created_str = db.format_task_created(created_iso)
 
             status_label = STATUS_LABELS.get(status, status)
             if status == "running" and progress > 0:
@@ -349,6 +353,12 @@ class TaskListView(QWidget):
         if self._app:
             self._app.show_create()
 
+    def _open_settings(self):
+        from gui.settings_dialog import SettingsDialog
+
+        dlg = SettingsDialog(self)
+        dlg.exec()
+
     # ── Context menu ──────────────────────────────────────────────────────
 
     def _show_context_menu(self, pos):
@@ -360,18 +370,24 @@ class TaskListView(QWidget):
             return
 
         menu = QMenu(self)
+        act_continue     = menu.addAction("Продолжить проверку")
         act_retry        = menu.addAction("Повторить проверку")
         act_retry_failed = menu.addAction("Повторить неудачные")
+        act_add_links    = menu.addAction("Добавить ссылки")
         act_clone        = menu.addAction("Дублировать задание")
         act_export       = menu.addAction("Экспортировать в .xlsx")
         menu.addSeparator()
         act_delete = menu.addAction("Удалить задание")
 
         action = menu.exec(self._table.viewport().mapToGlobal(pos))
-        if action == act_retry and self._app:
+        if action == act_continue and self._app:
+            self._app.continue_task(task_id)
+        elif action == act_retry and self._app:
             self._app.retry_task(task_id)
         elif action == act_retry_failed and self._app:
             self._app.retry_failed_task(task_id)
+        elif action == act_add_links and self._app:
+            self._app.edit_task(task_id)
         elif action == act_clone and self._app:
             self._app.clone_task(task_id)
         elif action == act_export and self._app:

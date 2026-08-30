@@ -1,12 +1,11 @@
 """
-Export task results to Excel (.xlsx) with 4 sheets.
+Export task results to Excel (.xlsx) with 5 sheets.
 """
 
 import json
 import logging
 import re
 from collections import defaultdict
-from datetime import datetime
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -112,6 +111,53 @@ def _write_row(ws, row_idx: int, values: list, zebra: bool = True):
 
 # ── Sheet builders ─────────────────────────────────────────────────────────
 
+_ROBOTS_RU = {"open": "Открыто", "closed": "Закрыто"}
+_GINDEX_RU = {"indexed": "Да", "not_indexed": "Нет", "error": "Ошибка"}
+
+
+def _donor_gindex(donor) -> str:
+    try:
+        return donor["google_indexed"] or ""
+    except (KeyError, IndexError):
+        return ""
+
+
+def _donor_gindex_error(donor) -> str:
+    try:
+        return donor["google_index_error"] or ""
+    except (KeyError, IndexError):
+        return ""
+
+
+def _donor_html_snippet(donor) -> str:
+    try:
+        return donor["html_snippet"] or ""
+    except (KeyError, IndexError):
+        return ""
+
+
+def _robots_label(value) -> str:
+    if not value:
+        return "—"
+    return _ROBOTS_RU.get(value, str(value))
+
+
+def _gindex_label(value) -> str:
+    if not value:
+        return "—"
+    return _GINDEX_RU.get(value, "—")
+
+
+def _value_fill(value) -> PatternFill | None:
+    if value in ("Открыто", "Да"):
+        return PatternFill(patternType="solid", fgColor=CLR_GREEN, bgColor=CLR_WHITE)
+    if value in ("Закрыто", "Нет"):
+        return PatternFill(patternType="solid", fgColor=CLR_RED, bgColor=CLR_WHITE)
+    if value == "Ошибка":
+        return PatternFill(patternType="solid", fgColor=CLR_ORANGE, bgColor=CLR_WHITE)
+    return None
+
+
 def _sheet_summary(wb, task, target_domains, donors, backlinks):
     ws = wb.create_sheet("Сводка")
 
@@ -123,6 +169,10 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
     open_count   = sum(1 for d in donors if d["index_google"] == "open")
     closed_count = sum(1 for d in donors if d["index_google"] == "closed")
     unknown_count = total_donors - open_count - closed_count  # not loaded / pending
+    g_yes = sum(1 for d in donors if _donor_gindex(d) == "indexed")
+    g_no = sum(1 for d in donors if _donor_gindex(d) == "not_indexed")
+    g_err = sum(1 for d in donors if _donor_gindex(d) == "error")
+    g_skip = total_donors - g_yes - g_no - g_err
 
     _STATUS_RU = {
         "pending":   "В очереди",
@@ -131,11 +181,7 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
         "error":     "Ошибка",
     }
 
-    try:
-        dt = datetime.fromisoformat(task["created_at"])
-        created_str = dt.strftime("%d.%m.%Y %H:%M")
-    except Exception:
-        created_str = str(task["created_at"])
+    created_str = db.format_task_created(task["created_at"])
 
     rows = [
         ("Название задания",         task["name"]),
@@ -149,12 +195,16 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
         ("Nofollow",                 nf_count),
         ("Текстовые анкоры",         text_count),
         ("Графические анкоры",       img_count),
-        ("Страниц открыто (Google)", open_count),
-        ("Страниц закрыто (Google)", closed_count),
-        ("Страниц не определено",    unknown_count),
+        ("Robots открыто (Google)",  open_count),
+        ("Robots закрыто (Google)",  closed_count),
+        ("Robots не определено",     unknown_count),
+        ("В индексе Google (да)",    g_yes),
+        ("В индексе Google (нет)",   g_no),
+        ("В индексе Google (ошибка)", g_err),
+        ("В индексе Google (не проверялось)", g_skip),
     ]
 
-    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["A"].width = 36
     ws.column_dimensions["B"].width = 50
 
     for r, (key, val) in enumerate(rows, 1):
@@ -169,9 +219,10 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
 def _sheet_donors(wb, donors, backlinks):
     ws = wb.create_sheet("Доноры")
     headers = [
-        "URL донора", "HTTP статус", "Title", "Canonical",
+        "URL донора", "HTTP статус", "Title", "Canonical", "HTML сниппет",
         "Внутр. ссылок", "Внешн. ссылок",
-        "Индекс Google", "Индекс Yandex", "Индекс Bing", "Индекс Baidu",
+        "Robots Google", "Robots Yandex", "Robots Bing", "Robots Baidu",
+        "В индексе Google", "Ошибка индекса Google",
         "Найдено бэклинков"
     ]
     _write_headers(ws, headers)
@@ -187,12 +238,15 @@ def _sheet_donors(wb, donors, backlinks):
             http or donor["error_code"] or "—",
             donor["title"] or "",
             donor["canonical_url"] or "",
+            _donor_html_snippet(donor),
             donor["internal_links"] or 0,
             donor["external_links"] or 0,
-            donor["index_google"] or "—",
-            donor["index_yandex"] or "—",
-            donor["index_bing"] or "—",
-            donor["index_baidu"] or "—",
+            _robots_label(donor["index_google"]),
+            _robots_label(donor["index_yandex"]),
+            _robots_label(donor["index_bing"]),
+            _robots_label(donor["index_baidu"]),
+            _gindex_label(_donor_gindex(donor)),
+            _donor_gindex_error(donor),
             bl_counts.get(donor["id"], 0),
         ]
         _write_row(ws, row_idx, values)
@@ -201,6 +255,11 @@ def _sheet_donors(wb, donors, backlinks):
         http_fill = _http_fill(http)
         if http_fill:
             status_cell.fill = http_fill
+        for col in (8, 9, 10, 11, 12):
+            cell = ws.cell(row=row_idx, column=col)
+            fill = _value_fill(cell.value)
+            if fill:
+                cell.fill = fill
 
     _auto_width(ws)
 
@@ -280,7 +339,7 @@ def export_to_excel(task_id: int, output_path: str) -> None:
         raise ValueError(f"Task {task_id} not found")
 
     try:
-        target_domains = json.loads(task["target_domains"])
+        target_domains = db.parse_target_domains(task["target_domains"])
     except (json.JSONDecodeError, TypeError) as exc:
         logger.error("Corrupted target_domains for task %d: %s", task_id, exc)
         raise ValueError(f"Task {task_id} has corrupted target_domains") from exc
