@@ -43,20 +43,6 @@ QPushButton#btnCreate:hover {{
         stop:0 #47B7E8, stop:1 #1C8FFF);
 }}
 
-QPushButton#btnTelegram {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #34AADC, stop:1 #007AFF);
-    color: #fff;
-    font-size: 11px;
-    border: none;
-    border-radius: 10px;
-    padding: 4px 12px;
-}}
-QPushButton#btnTelegram:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #47B7E8, stop:1 #1C8FFF);
-}}
-
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {{
     background-color: {input_bg};
     color: {text};

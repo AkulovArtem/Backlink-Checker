@@ -89,6 +89,12 @@ class SettingsDialog(QDialog):
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
+        save_btn = buttons.button(QDialogButtonBox.StandardButton.Save)
+        if save_btn is not None:
+            save_btn.setText("Сохранить")
+        cancel_btn = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_btn is not None:
+            cancel_btn.setText("Отмена")
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         row = QHBoxLayout()

@@ -28,10 +28,11 @@ class ParseDonorLinesTest(unittest.TestCase):
         self.assertEqual(valid, ["https://ok.example/"])
         self.assertEqual(invalid, 2)
 
-    def test_respects_limit(self):
+    def test_does_not_drop_urls_over_limit(self):
+        """Caller must see the extras so it can warn instead of silently truncating."""
         text = "\n".join(f"https://example.com/{i}" for i in range(5))
-        valid, invalid = parse_donor_lines(text, limit=2)
-        self.assertEqual(len(valid), 2)
+        valid, invalid = parse_donor_lines(text)
+        self.assertEqual(len(valid), 5)
         self.assertEqual(invalid, 0)
 
     def test_empty_and_blank_lines(self):

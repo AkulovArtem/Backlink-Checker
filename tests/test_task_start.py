@@ -5,6 +5,7 @@ from core.task_start import (
     can_launch_after_balance,
     is_current_generation,
     is_task_busy,
+    take_finished_worker,
 )
 
 
@@ -108,6 +109,26 @@ class IsTaskBusyTest(unittest.TestCase):
                 is_stopping=False,
             )
         )
+
+
+class TakeFinishedWorkerTest(unittest.TestCase):
+    def test_stale_finish_leaves_new_worker(self):
+        old, new = object(), object()
+        workers = {7: new}
+        self.assertFalse(take_finished_worker(workers, 7, old))
+        self.assertIs(workers[7], new)
+
+    def test_matching_worker_is_removed(self):
+        worker = object()
+        workers = {7: worker}
+        self.assertTrue(take_finished_worker(workers, 7, worker))
+        self.assertNotIn(7, workers)
+
+    def test_none_worker_does_not_pop(self):
+        worker = object()
+        workers = {7: worker}
+        self.assertFalse(take_finished_worker(workers, 7, None))
+        self.assertIs(workers[7], worker)
 
 
 if __name__ == "__main__":
