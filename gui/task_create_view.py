@@ -34,7 +34,7 @@ from core.google_index import (
 from db import database as db
 from gui.icons import OrDivider
 from gui.settings_dialog import SETTING_RIVER_URL, SETTING_STOCK_URL, _BalanceWorker
-from utils.url_utils import MAX_DONORS, parse_donor_lines
+from utils.url_utils import MAX_DONORS, MAX_TARGETS, parse_donor_lines
 from utils.user_agents import PROFILES
 
 logger = logging.getLogger(__name__)
@@ -296,30 +296,38 @@ class TaskCreateView(QWidget):
             max(0, MAX_DONORS - self._existing_count) if is_append else MAX_DONORS
         )
 
-        if is_append and remaining == 0:
-            self._error_lbl.setText("Достигнут лимит 100 000 доноров в задании.")
-            self._error_lbl.setVisible(True)
-            return
-
         valid_all, invalid_count = parse_donor_lines(self._donors_edit.toPlainText())
         valid_donors = valid_all[:remaining]
         capped_count = len(valid_all) - len(valid_donors)
 
-        # Parse & deduplicate targets (cap at 50)
         raw_targets = [
             t.strip() for t in self._targets_edit.toPlainText().splitlines()
             if t.strip()
         ]
-        targets = list(dict.fromkeys(raw_targets))[:50]
+        unique_targets = list(dict.fromkeys(raw_targets))
+        target_capped = max(0, len(unique_targets) - MAX_TARGETS)
+        targets = unique_targets[:MAX_TARGETS]
 
-        if not valid_donors:
-            self._error_lbl.setText(
-                "Добавьте хотя бы одну корректную ссылку-донор (http/https)."
-            )
-            self._error_lbl.setVisible(True)
-            return
+        old_targets: list[str] = []
+        if is_append:
+            task_row = db.get_task(self._edit_task_id) if self._edit_task_id else None
+            if task_row:
+                old_targets = _task_target_domains(task_row)
+        targets_changed = [t.lower() for t in targets] != [t.lower() for t in old_targets]
+
         if not targets:
             self._error_lbl.setText("Добавьте хотя бы один целевой домен.")
+            self._error_lbl.setVisible(True)
+            return
+        if not valid_donors and not (is_append and targets_changed):
+            if is_append and target_capped:
+                self._error_lbl.setText(
+                    f"Достигнут лимит {MAX_TARGETS} целевых доменов."
+                )
+            else:
+                self._error_lbl.setText(
+                    "Добавьте хотя бы одну корректную ссылку-донор (http/https)."
+                )
             self._error_lbl.setVisible(True)
             return
 
@@ -340,6 +348,10 @@ class TaskCreateView(QWidget):
             skip_notes.append(
                 f"{capped_count} URL пропущено — лимит {MAX_DONORS} доноров"
             )
+        if target_capped > 0:
+            skip_notes.append(
+                f"{target_capped} домен(ов) пропущено — лимит {MAX_TARGETS}"
+            )
         if skip_notes and not self._skip_confirmed:
             action = "добавлено" if is_append else "создано"
             btn_label = "«Добавить и проверить»" if is_append else "«Создать»"
@@ -358,6 +370,7 @@ class TaskCreateView(QWidget):
         timeout = self._timeout_spin.value()
         check_index = self._index_check.isChecked()
         index_provider = self._selected_index_provider() if check_index else ""
+        added = 0
 
         try:
             if is_append:
@@ -373,14 +386,18 @@ class TaskCreateView(QWidget):
                     timeout=timeout,
                     check_google_index=1 if check_index else 0,
                     index_provider=index_provider,
+                    target_domains=json.dumps(targets, ensure_ascii=False),
                 )
-                result = db.add_donors_to_task(task_id, valid_donors)
-                if result["added"] == 0:
-                    self._error_lbl.setText(
-                        "Все указанные ссылки уже есть в задании."
-                    )
-                    self._error_lbl.setVisible(True)
-                    return
+                added = 0
+                if valid_donors:
+                    result = db.add_donors_to_task(task_id, valid_donors)
+                    added = result["added"]
+                    if added == 0 and not targets_changed:
+                        self._error_lbl.setText(
+                            "Все указанные ссылки уже есть в задании."
+                        )
+                        self._error_lbl.setVisible(True)
+                        return
             else:
                 task_id = db.create_task(
                     name=name,
@@ -402,7 +419,8 @@ class TaskCreateView(QWidget):
             return
 
         if self._app:
-            self._app.start_task(task_id)
+            if not is_append or added:
+                self._app.start_task(task_id)
             if is_append:
                 self._app.show_report(task_id)
             else:
@@ -449,8 +467,8 @@ class TaskCreateView(QWidget):
         self._name_edit.setText(task["name"])
         self._existing_lbl.setText(
             f"В задании уже {existing_count} донор(ов). "
-            "Новые ссылки проверятся по тем же целевым доменам. "
-            "Уже проверенные не будут перезапущены."
+            "Можно добавить новых доноров и целевые домены (акцепторы). "
+            "Уже проверенные доноры не будут перезапущены."
         )
         self._existing_lbl.setVisible(True)
         self._donors_hint.setText(
@@ -459,7 +477,7 @@ class TaskCreateView(QWidget):
         )
 
         self._targets_edit.setPlainText("\n".join(_task_target_domains(task)))
-        self._targets_edit.setReadOnly(True)
+        self._targets_edit.setReadOnly(False)
 
         ua = task["user_agent"] or "desktop_chrome"
         for i in range(self._ua_combo.count()):

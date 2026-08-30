@@ -193,9 +193,21 @@ def delete_task(task_id: int) -> None:
         conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
 
 
+def wipe_check_data() -> None:
+    """Delete all tasks, donors and backlinks. Settings (API URLs, theme) stay.
+
+    AUTOINCREMENT ids are left alone so a worker that still persists after
+    stop cannot attach rows to a brand-new task that reused id 1.
+    """
+    with get_connection() as conn:
+        conn.execute("DELETE FROM backlinks")
+        conn.execute("DELETE FROM donors")
+        conn.execute("DELETE FROM tasks")
+
+
 _TASK_FIELDS = frozenset({
     "name", "user_agent", "custom_user_agent", "threads", "timeout",
-    "check_google_index", "index_provider",
+    "check_google_index", "index_provider", "target_domains",
 })
 
 

@@ -6,17 +6,18 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QDialogButtonBox
+from PyQt6.QtWidgets import QApplication, QPushButton
 
 from core.google_index import BalanceResult
 from db import database as db
+from gui.confirm import make_confirm_dialog
 from gui.settings_dialog import (
     SETTING_RIVER_URL,
     SETTING_STOCK_URL,
     SettingsDialog,
 )
 from gui.task_create_view import TaskCreateView
-from utils.url_utils import MAX_DONORS
+from utils.url_utils import MAX_DONORS, MAX_TARGETS
 
 _TASK = {
     "id": 7,
@@ -46,7 +47,7 @@ class TaskCreateAppendModeTest(unittest.TestCase):
         db.DB_PATH = self._old_path
         self._tmp.cleanup()
 
-    def test_append_mode_locks_targets_and_does_not_dump_old_urls(self):
+    def test_append_mode_keeps_existing_urls_empty_and_unlocks_targets(self):
         view = TaskCreateView()
         view.enter_append_mode(_TASK, existing_count=12)
 
@@ -54,7 +55,7 @@ class TaskCreateAppendModeTest(unittest.TestCase):
         self.assertEqual(view._heading_lbl.text(), "Добавить ссылки")
         self.assertEqual(view._submit_btn.text(), "Добавить и проверить")
         self.assertEqual(view._name_edit.text(), "Проверка example.com")
-        self.assertTrue(view._targets_edit.isReadOnly())
+        self.assertFalse(view._targets_edit.isReadOnly())
         self.assertIn("example.com", view._targets_edit.toPlainText())
         self.assertEqual(view._donors_edit.toPlainText(), "")
         self.assertFalse(view._existing_lbl.isHidden())
@@ -108,6 +109,63 @@ class TaskCreateAppendModeTest(unittest.TestCase):
         self.assertTrue(view._provider_box.isHidden())
         self.assertTrue(view._river_radio.isChecked())
 
+    def test_append_saves_new_acceptors_without_donors_or_recheck(self):
+        tid = db.create_task("t", ["example.com"])
+        db.create_donors_bulk(tid, ["https://a.example/1"])
+        db.update_donor(int(db.get_donors_for_task(tid)[0]["id"]), status="found")
+        task = db.get_task(tid)
+        view = TaskCreateView()
+        fake = _FakeApp()
+        view.set_app(fake)
+        view.enter_append_mode(task, existing_count=1)
+        view._targets_edit.setPlainText("example.com\nnew.com")
+        view._submit()
+        saved = db.parse_target_domains(db.get_task(tid)["target_domains"])
+        self.assertEqual(saved, ["example.com", "new.com"])
+        self.assertEqual(fake.started, [])
+        self.assertEqual(fake.reports, [tid])
+        self.assertEqual(db.get_donors_for_task(tid)[0]["status"], "found")
+
+    def test_append_caps_acceptors_at_max_targets(self):
+        tid = db.create_task("t", ["example.com"])
+        task = db.get_task(tid)
+        view = TaskCreateView()
+        view.set_app(_FakeApp())
+        view.enter_append_mode(task, existing_count=0)
+        view._targets_edit.setPlainText(
+            "\n".join(f"d{i}.example" for i in range(MAX_TARGETS + 5))
+        )
+        view._submit()
+        self.assertFalse(view._warn_lbl.isHidden())
+        self.assertIn(str(MAX_TARGETS), view._warn_lbl.text())
+        view._submit()
+        saved = db.parse_target_domains(db.get_task(tid)["target_domains"])
+        self.assertEqual(len(saved), MAX_TARGETS)
+
+    def test_append_errors_when_new_acceptor_exceeds_cap(self):
+        domains = [f"d{i}.example" for i in range(MAX_TARGETS)]
+        tid = db.create_task("t", domains)
+        task = db.get_task(tid)
+        view = TaskCreateView()
+        view.set_app(_FakeApp())
+        view.enter_append_mode(task, existing_count=0)
+        view._targets_edit.setPlainText("\n".join(domains + ["new.example"]))
+        view._submit()
+        saved = db.parse_target_domains(db.get_task(tid)["target_domains"])
+        self.assertEqual(saved, domains)
+        self.assertFalse(view._error_lbl.isHidden())
+        self.assertIn(str(MAX_TARGETS), view._error_lbl.text())
+
+    def test_append_errors_when_nothing_new(self):
+        tid = db.create_task("t", ["example.com"])
+        task = db.get_task(tid)
+        view = TaskCreateView()
+        view.set_app(_FakeApp())
+        view.enter_append_mode(task, existing_count=1)
+        view._submit()
+        self.assertFalse(view._error_lbl.isHidden())
+        self.assertIn("донор", view._error_lbl.text().lower())
+
     @patch(
         "gui.settings_dialog.fetch_balance",
         return_value=BalanceResult(ok=True, amount=10),
@@ -134,6 +192,21 @@ class TaskCreateAppendModeTest(unittest.TestCase):
             worker.wait(2000)
 
 
+class _FakeApp:
+    def __init__(self):
+        self.started: list[int] = []
+        self.reports: list[int] = []
+
+    def start_task(self, task_id: int):
+        self.started.append(task_id)
+
+    def show_report(self, task_id: int):
+        self.reports.append(task_id)
+
+    def show_list(self):
+        pass
+
+
 class SettingsButtonsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -149,14 +222,36 @@ class SettingsButtonsTest(unittest.TestCase):
         db.DB_PATH = self._old_path
         self._tmp.cleanup()
 
-    def test_dialog_buttons_are_russian(self):
+    def test_dialog_buttons_are_russian_cancel_then_save(self):
         dlg = SettingsDialog()
-        box = dlg.findChild(QDialogButtonBox)
-        self.assertIsNotNone(box)
-        save_btn = box.button(QDialogButtonBox.StandardButton.Save)
-        cancel_btn = box.button(QDialogButtonBox.StandardButton.Cancel)
-        self.assertEqual(save_btn.text(), "Сохранить")
-        self.assertEqual(cancel_btn.text(), "Отмена")
+        self.assertEqual(dlg._cancel_btn.text(), "Отмена")
+        self.assertEqual(dlg._save_btn.text(), "Сохранить")
+        self.assertEqual(dlg._wipe_btn.text(), "Очистить базу")
+        row = dlg._button_row
+        widgets = [
+            row.itemAt(i).widget()
+            for i in range(row.count())
+            if row.itemAt(i).widget() is not None
+        ]
+        self.assertEqual(
+            [w.text() for w in widgets if isinstance(w, QPushButton)],
+            ["Очистить базу", "Отмена", "Сохранить"],
+        )
+        dlg.close()
+
+    def test_confirm_dialog_cancel_then_ok(self):
+        dlg = make_confirm_dialog(
+            None, "Удалить", "Точно?", ok_label="Да", cancel_label="Отмена"
+        )
+        self.assertEqual(dlg._cancel_btn.text(), "Отмена")
+        self.assertEqual(dlg._ok_btn.text(), "Да")
+        row = dlg._button_row
+        texts = [
+            row.itemAt(i).widget().text()
+            for i in range(row.count())
+            if row.itemAt(i).widget() is not None
+        ]
+        self.assertEqual(texts, ["Отмена", "Да"])
         dlg.close()
 
 

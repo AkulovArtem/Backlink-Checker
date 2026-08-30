@@ -133,6 +133,32 @@ class AddDonorsToTaskTest(unittest.TestCase):
         with self.assertRaises(json.JSONDecodeError):
             db.parse_target_domains("{not-json")
 
+    def test_update_task_fields_stores_target_domains(self):
+        db.update_task_fields(
+            self.task_id,
+            target_domains=json.dumps(["example.com", "new.com"], ensure_ascii=False),
+        )
+        task = db.get_task(self.task_id)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(
+            db.parse_target_domains(task["target_domains"]),
+            ["example.com", "new.com"],
+        )
+
+    def test_wipe_check_data_deletes_tasks_keeps_settings(self):
+        db.set_setting("theme", "dark")
+        db.set_setting("xmlriver_url", "http://xmlriver.com/search/xml?user=1&key=a")
+        db.wipe_check_data()
+        self.assertEqual(db.get_all_tasks_with_counts(), [])
+        self.assertEqual(db.get_setting("theme"), "dark")
+        self.assertIn("xmlriver", db.get_setting("xmlriver_url"))
+        tid = db.create_task("fresh", ["x.com"])
+        self.assertIsNotNone(db.get_task(tid))
+        # Do not reuse ids 1, 2, … — a dying worker can still persist
+        # backlinks for the old task_id after wipe.
+        self.assertGreater(tid, self.task_id)
+
     def test_clip_html_snippet_truncates(self):
         self.assertEqual(clip_html_snippet("abc"), "abc")
         self.assertEqual(clip_html_snippet(None), "")
