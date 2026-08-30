@@ -6,7 +6,6 @@ import logging
 import os
 import sys
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication

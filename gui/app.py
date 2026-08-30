@@ -5,7 +5,7 @@ Main application window — routes between the three screens.
 import json
 import logging
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -24,11 +24,17 @@ from core.google_index import (
     pick_provider,
 )
 from core.models import CheckConfig
+from core.task_start import (
+    bump_generation,
+    can_launch_after_balance,
+    is_current_generation,
+    is_task_busy,
+)
 from db import database as db
-from gui.settings_dialog import SETTING_RIVER_URL, SETTING_STOCK_URL
 from export.excel_export import export_to_excel
 from gui.constants import APP_VERSION
 from gui.report_view import ReportView
+from gui.settings_dialog import SETTING_RIVER_URL, SETTING_STOCK_URL
 from gui.task_create_view import TaskCreateView
 from gui.task_list_view import TaskListView
 from gui.theme import DARK_QSS, LIGHT_QSS
@@ -40,6 +46,17 @@ logger = logging.getLogger(__name__)
 SCREEN_LIST   = 0
 SCREEN_CREATE = 1
 SCREEN_REPORT = 2
+
+
+class _BalanceResolveThread(QThread):
+    resolved = pyqtSignal(object, object)
+
+    def run(self):
+        river_url = db.get_setting(SETTING_RIVER_URL, "")
+        stock_url = db.get_setting(SETTING_STOCK_URL, "")
+        river_bal = fetch_balance(PROVIDER_RIVER, river_url) if river_url else None
+        stock_bal = fetch_balance(PROVIDER_STOCK, stock_url) if stock_url else None
+        self.resolved.emit(*pick_provider(river_url, river_bal, stock_url, stock_bal))
 
 
 class MainApp(QMainWindow):
@@ -54,6 +71,11 @@ class MainApp(QMainWindow):
 
         self._dark_mode = db.get_setting("theme", "light") == "dark"
         self._workers: dict[int, CheckWorker] = {}
+        self._starting: set[int] = set()
+        self._stopping: set[int] = set()
+        self._start_gen: dict[int, int] = {}
+        self._balance_threads: list[QThread] = []
+        self._closing = False
 
         # Throttle report refresh to at most once per second during active checks
         self._report_refresh_timer = QTimer(self)
@@ -105,9 +127,29 @@ class MainApp(QMainWindow):
 
     # ── Task actions ──────────────────────────────────────────────────────
 
+    def _is_busy(self, task_id: int) -> bool:
+        return is_task_busy(
+            closing=self._closing,
+            has_worker=task_id in self._workers,
+            is_starting=task_id in self._starting,
+            is_stopping=task_id in self._stopping,
+        )
+
+    def _mark_running_in_ui(self, task_id: int) -> None:
+        db.update_task_status(task_id, "running", 0)
+        self._list_view.update_task_row(task_id)
+
+    def _revert_orphan_running(self, task_id: int) -> None:
+        if task_id in self._workers:
+            return
+        task = db.get_task(task_id)
+        if task and task["status"] == "running":
+            db.update_task_status(task_id, "pending", 0)
+            self._list_view.update_task_row(task_id)
+
     def start_task(self, task_id: int):
         """Check pending donors for the task. Leaves already-checked rows intact."""
-        if task_id in self._workers:
+        if self._is_busy(task_id):
             logger.warning("Task %d is already running", task_id)
             return
 
@@ -121,7 +163,7 @@ class MainApp(QMainWindow):
             return
 
         try:
-            target_domains = json.loads(task["target_domains"])
+            target_domains = db.parse_target_domains(task["target_domains"])
         except (json.JSONDecodeError, TypeError):
             logger.error("Corrupted target_domains for task %d", task_id)
             return
@@ -132,19 +174,57 @@ class MainApp(QMainWindow):
         except (KeyError, IndexError):
             check_index = False
 
-        provider = None
+        donor_urls = [(int(d["id"]), str(d["url"])) for d in donors]
         if check_index:
-            provider, notices = self._resolve_index_provider()
-            if notices:
-                QMessageBox.warning(
-                    self, "Проверка индексации", "\n\n".join(notices)
+            gen = bump_generation(self._start_gen, task_id)
+            self._starting.add(task_id)
+            self._mark_running_in_ui(task_id)
+            thread = _BalanceResolveThread(self)
+            thread.resolved.connect(
+                lambda provider, notices, tid=task_id, urls=donor_urls, t=task, domains=target_domains, g=gen:
+                self._on_index_provider_ready(
+                    tid, urls, t, domains, provider, notices, g
                 )
-            if provider is None:
-                check_index = False
+            )
+            thread.finished.connect(lambda t=thread: self._reap_balance_thread(t))
+            self._balance_threads.append(thread)
+            thread.start()
+            return
 
+        self._launch_check_worker(
+            task_id, donor_urls, task, target_domains, False, None
+        )
+
+    def _on_index_provider_ready(
+        self, task_id, donor_urls, task, target_domains, provider, notices, gen
+    ):
+        self._starting.discard(task_id)
+        if notices and is_current_generation(self._start_gen, task_id, gen) and not self._closing:
+            QMessageBox.warning(
+                self, "Проверка индексации", "\n\n".join(notices)
+            )
+        if not can_launch_after_balance(
+            closing=self._closing,
+            gen_current=is_current_generation(self._start_gen, task_id, gen),
+            task_exists=db.get_task(task_id) is not None,
+            has_worker=task_id in self._workers,
+        ):
+            if (
+                is_current_generation(self._start_gen, task_id, gen)
+                and task_id not in self._workers
+            ):
+                self._revert_orphan_running(task_id)
+            return
+        self._launch_check_worker(
+            task_id, donor_urls, task, target_domains, provider is not None, provider
+        )
+
+    def _launch_check_worker(
+        self, task_id, donor_urls, task, target_domains, check_index, provider
+    ):
         config = CheckConfig(
             task_id=task_id,
-            donor_urls=[(int(d["id"]), str(d["url"])) for d in donors],
+            donor_urls=donor_urls,
             target_domains=target_domains,
             user_agent_preset=task["user_agent"],
             custom_user_agent=task["custom_user_agent"] or "",
@@ -153,22 +233,12 @@ class MainApp(QMainWindow):
             check_google_index=check_index,
             index_provider=provider,
         )
-
+        db.update_task_status(task_id, "running", 0)
         worker = CheckWorker(config)
         self._workers[task_id] = worker
         self._wire_worker(worker, task_id)
-        logger.info("Task %d started (%d pending donor(s))", task_id, len(donors))
-
-    def _resolve_index_provider(self):
-        river_url = db.get_setting(SETTING_RIVER_URL, "")
-        stock_url = db.get_setting(SETTING_STOCK_URL, "")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            river_bal = fetch_balance(PROVIDER_RIVER, river_url) if river_url else None
-            stock_bal = fetch_balance(PROVIDER_STOCK, stock_url) if stock_url else None
-        finally:
-            QApplication.restoreOverrideCursor()
-        return pick_provider(river_url, river_bal, stock_url, stock_bal)
+        self._list_view.update_task_row(task_id)
+        logger.info("Task %d started (%d pending donor(s))", task_id, len(donor_urls))
 
     # ── Worker lifecycle helpers ──────────────────────────────────────────
 
@@ -196,21 +266,64 @@ class MainApp(QMainWindow):
         worker.terminate()
         worker.wait(1000)
 
+    def _reap_balance_thread(self, thread: QThread) -> None:
+        try:
+            self._balance_threads.remove(thread)
+        except ValueError:
+            pass
+
+    def _stop_and_reap_worker(self, task_id: int) -> None:
+        """Stop a running worker while keeping the task busy for the UI."""
+        worker = self._workers.get(task_id)
+        if worker is None:
+            return
+        self._stopping.add(task_id)
+        try:
+            self._stop_worker(worker)
+        finally:
+            self._workers.pop(task_id, None)
+            self._stopping.discard(task_id)
+
+    def continue_task(self, task_id: int):
+        """Resume pending donors without wiping already-checked rows."""
+        if self._is_busy(task_id):
+            QMessageBox.information(
+                self,
+                "Задание выполняется",
+                "Дождитесь окончания проверки.",
+            )
+            return
+        pending = db.get_pending_donors_for_task(task_id)
+        if not pending:
+            QMessageBox.information(
+                self,
+                "Нет доноров в очереди",
+                "Все доноры уже проверены. «Повторить неудачные» перезапустит ошибки загрузки.",
+            )
+            return
+        self.start_task(task_id)
+        self._list_view.refresh()
+
     def retry_task(self, task_id: int):
-        if task_id in self._workers:
-            self._stop_worker(self._workers.pop(task_id))
+        self._cancel_start(task_id)
+        self._stop_and_reap_worker(task_id)
         db.reset_task(task_id)
         self.start_task(task_id)
         self._list_view.refresh()
 
     def retry_failed_task(self, task_id: int):
         """Re-run only donors that previously failed to load (status = not_loaded)."""
-        if task_id in self._workers:
-            self._stop_worker(self._workers.pop(task_id))
+        self._cancel_start(task_id)
+        self._stop_and_reap_worker(task_id)
 
         failed = db.get_failed_donors_for_task(task_id)
         if not failed:
-            logger.info("Task %d: no failed donors to retry", task_id)
+            QMessageBox.information(
+                self,
+                "Нет неудачных доноров",
+                "Нет доноров со статусом «Не загружено». "
+                "«Продолжить проверку» возьмёт оставшихся в очереди.",
+            )
             return
 
         db.reset_failed_donors(task_id)
@@ -220,7 +333,7 @@ class MainApp(QMainWindow):
 
     def edit_task(self, task_id: int):
         """Open the create form in append mode for an existing (not running) task."""
-        if task_id in self._workers:
+        if self._is_busy(task_id):
             QMessageBox.information(
                 self,
                 "Задание выполняется",
@@ -246,9 +359,15 @@ class MainApp(QMainWindow):
         self._stack.setCurrentIndex(SCREEN_CREATE)
         logger.info("Task %d cloned into create form", task_id)
 
+    def _cancel_start(self, task_id: int) -> None:
+        if task_id in self._starting:
+            bump_generation(self._start_gen, task_id)
+            self._starting.discard(task_id)
+            self._revert_orphan_running(task_id)
+
     def delete_task(self, task_id: int):
-        if task_id in self._workers:
-            self._stop_worker(self._workers.pop(task_id))
+        self._cancel_start(task_id)
+        self._stop_and_reap_worker(task_id)
         db.delete_task(task_id)
         # If we're viewing this task's report — go back to list
         if (self._stack.currentIndex() == SCREEN_REPORT
@@ -325,7 +444,15 @@ class MainApp(QMainWindow):
     # ── Graceful shutdown ─────────────────────────────────────────────────
 
     def closeEvent(self, event):
-        # Signal all workers to stop simultaneously, then wait for each
+        self._closing = True
+        for thread in list(self._balance_threads):
+            try:
+                thread.resolved.disconnect()
+            except TypeError:
+                pass
+        for task_id in list(self._starting):
+            self._revert_orphan_running(task_id)
+        self._starting.clear()
         workers = list(self._workers.values())
         for w in workers:
             w.stop()
@@ -339,4 +466,11 @@ class MainApp(QMainWindow):
             else:
                 w.terminate()
                 w.wait(1000)
+        for thread in list(self._balance_threads):
+            step, elapsed = 50, 0
+            while elapsed < 8000:
+                if thread.wait(step):
+                    break
+                QApplication.processEvents()
+                elapsed += step
         event.accept()

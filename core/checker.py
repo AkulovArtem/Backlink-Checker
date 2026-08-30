@@ -5,15 +5,15 @@ Communicates progress via an asyncio.Queue so the Qt worker can relay signals.
 
 import asyncio
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from playwright.async_api import Error as PWError
 from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
 
-from core.google_index import INDEX_CONCURRENCY, check_url_indexed
+from core.google_index import INDEX_CONCURRENCY, check_url_indexed, index_url_for_check
 from core.indexability import check_indexability
-from core.models import CheckConfig, DonorResult
+from core.models import CheckConfig, DonorResult, clip_html_snippet
 from core.parser import parse_page
 from utils.user_agents import get_profile
 
@@ -87,6 +87,8 @@ async def _check_one(
         await _scroll_for_lazy_content(page)
         html = await page.content()
         final_url = page.url  # may differ from url after HTTP redirects
+        result.final_url = final_url
+        result.html_snippet = clip_html_snippet(html)
 
     except PWTimeout:
         result.status = "not_loaded"
@@ -181,29 +183,36 @@ async def run_check(
                         status="not_loaded", error_code="UNKNOWN",
                     )
 
-                if (
-                    config.check_google_index
-                    and config.index_provider is not None
-                    and donor_result.status == "found"
-                ):
-                    async with index_sem:
-                        idx = await asyncio.to_thread(
-                            check_url_indexed, donor_result.url, config.index_provider
-                        )
-                    donor_result.google_indexed = idx.status
-                    donor_result.google_index_error = idx.error or None
+            # Index HTTP must not hold a Playwright slot.
+            if (
+                config.check_google_index
+                and config.index_provider is not None
+                and donor_result.status == "found"
+                and not stop_event.is_set()
+            ):
+                async with index_sem:
+                    idx_url = index_url_for_check(
+                        donor_result.url,
+                        donor_result.final_url,
+                        donor_result.canonical_url,
+                    )
+                    idx = await asyncio.to_thread(
+                        check_url_indexed, idx_url, config.index_provider
+                    )
+                donor_result.google_indexed = idx.status
+                donor_result.google_index_error = idx.error or None
 
+            try:
+                result_callback(donor_result)
+            except Exception as cb_exc:
+                logger.exception("result_callback error for %s: %s", url, cb_exc)
+
+            async with lock:
+                done_count += 1
                 try:
-                    result_callback(donor_result)
+                    progress_callback(done_count, total)
                 except Exception as cb_exc:
-                    logger.exception("result_callback error for %s: %s", url, cb_exc)
-
-                async with lock:
-                    done_count += 1
-                    try:
-                        progress_callback(done_count, total)
-                    except Exception as cb_exc:
-                        logger.exception("progress_callback error: %s", cb_exc)
+                    logger.exception("progress_callback error: %s", cb_exc)
 
         tasks = [
             asyncio.create_task(process(donor_id, url))

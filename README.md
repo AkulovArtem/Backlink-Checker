@@ -1,4 +1,4 @@
-# Backlink Checker 1.4.0
+# Backlink Checker 1.5.0
 
 Бесплатная программа для Windows и macOS: проверяет сайты-доноры на наличие ссылок на ваши сайты и разбирает качество этих ссылок.
 
@@ -7,7 +7,7 @@
 Сайт: [artemakulov.ru/backlink-checker](https://artemakulov.ru/backlink-checker/)  
 Telegram: [t.me/akulov_pro](https://t.me/akulov_pro)  
 Скачать для Windows x64: [BacklinkChecker.exe](https://artemakulov.ru/BacklinkChecker.exe)  
-Скачать для macOS (Apple Silicon): [BacklinkChecker-1.4.0-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.4.0/BacklinkChecker-1.4.0-macos-arm64.dmg)
+Скачать для macOS (Apple Silicon): [BacklinkChecker-1.5.0-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.5.0/BacklinkChecker-1.5.0-macos-arm64.dmg)
 
 ## Для кого
 
