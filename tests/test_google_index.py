@@ -8,6 +8,7 @@ from core.google_index import (
     build_index_request_url,
     canonical_search_endpoint,
     index_url_for_check,
+    needs_balance_fetch,
     parse_balance_body,
     parse_index_xml,
     parse_user_key,
@@ -214,6 +215,30 @@ class PickProviderTest(unittest.TestCase):
         self.assertIsNone(p)
         self.assertTrue(any("нулевым балансом" in n for n in notices))
 
+    def test_preferred_stock_even_when_river_has_money(self):
+        p, notices = pick_provider(
+            "http://xmlriver.com/search/xml?user=1&key=a",
+            BalanceResult(True, 10),
+            "https://xmlstock.com/google/xml/?user=2&key=b",
+            BalanceResult(True, 50),
+            preferred=PROVIDER_STOCK,
+        )
+        self.assertIsNotNone(p)
+        assert p is not None
+        self.assertEqual(p.name, PROVIDER_STOCK)
+        self.assertEqual(notices, [])
+
+    def test_preferred_river_does_not_fall_back_to_stock(self):
+        p, notices = pick_provider(
+            "http://xmlriver.com/search/xml?user=1&key=a",
+            BalanceResult(True, 0),
+            "https://xmlstock.com/google/xml/?user=2&key=b",
+            BalanceResult(True, 50),
+            preferred=PROVIDER_RIVER,
+        )
+        self.assertIsNone(p)
+        self.assertTrue(any("Выбран XMLRiver" in n for n in notices))
+
     def test_none_amount_has_explicit_notice(self):
         p, notices = pick_provider(
             "http://xmlriver.com/search/xml?user=1&key=a",
@@ -223,6 +248,21 @@ class PickProviderTest(unittest.TestCase):
         )
         self.assertIsNone(p)
         self.assertTrue(any("прочитать сумму" in n for n in notices))
+
+
+class NeedsBalanceFetchTest(unittest.TestCase):
+    def test_preferred_stock_skips_river(self):
+        self.assertFalse(needs_balance_fetch(PROVIDER_RIVER, PROVIDER_STOCK))
+        self.assertTrue(needs_balance_fetch(PROVIDER_STOCK, PROVIDER_STOCK))
+
+    def test_preferred_river_skips_stock(self):
+        self.assertTrue(needs_balance_fetch(PROVIDER_RIVER, PROVIDER_RIVER))
+        self.assertFalse(needs_balance_fetch(PROVIDER_STOCK, PROVIDER_RIVER))
+
+    def test_empty_preferred_fetches_both(self):
+        self.assertTrue(needs_balance_fetch(PROVIDER_RIVER, ""))
+        self.assertTrue(needs_balance_fetch(PROVIDER_STOCK, ""))
+        self.assertTrue(needs_balance_fetch(PROVIDER_RIVER, None))
 
 
 class RequestUrlTest(unittest.TestCase):

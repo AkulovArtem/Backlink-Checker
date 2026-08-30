@@ -94,11 +94,21 @@ class AddDonorsToTaskTest(unittest.TestCase):
         self.assertIsNotNone(task)
         assert task is not None
         self.assertEqual(task["check_google_index"], 1)
+        self.assertEqual(task["index_provider"] or "", "")
         db.create_donors_bulk(tid, ["https://a.example/1"])
         donor = db.get_donors_for_task(tid)[0]
         db.update_donor(int(donor["id"]), google_indexed="indexed")
         refreshed = db.get_donors_for_task(tid)[0]
         self.assertEqual(refreshed["google_indexed"], "indexed")
+
+    def test_create_task_stores_index_provider(self):
+        tid = db.create_task(
+            "idx", ["example.com"], check_google_index=True, index_provider="xmlstock"
+        )
+        task = db.get_task(tid)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task["index_provider"], "xmlstock")
 
     def test_html_snippet_roundtrip(self):
         donors = db.get_donors_for_task(self.task_id)

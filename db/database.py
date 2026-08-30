@@ -115,6 +115,9 @@ def init_db() -> None:
         _add_column_if_missing(
             conn, "tasks", "check_google_index", "INTEGER DEFAULT 0"
         )
+        _add_column_if_missing(
+            conn, "tasks", "index_provider", "TEXT DEFAULT ''"
+        )
         _add_column_if_missing(conn, "donors", "google_indexed", "TEXT")
         _add_column_if_missing(conn, "donors", "google_index_error", "TEXT")
     logger.info("Database initialized at %s", DB_PATH)
@@ -133,15 +136,16 @@ def _add_column_if_missing(
 
 def create_task(name: str, target_domains: list[str], user_agent: str = "desktop_chrome",
                 custom_user_agent: Optional[str] = None, threads: int = 5,
-                timeout: int = 30, check_google_index: bool = False) -> int:
+                timeout: int = 30, check_google_index: bool = False,
+                index_provider: str = "") -> int:
     with get_connection() as conn:
         cur = conn.execute(
             """INSERT INTO tasks (name, target_domains, user_agent, custom_user_agent,
-                                  threads, timeout, check_google_index)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                  threads, timeout, check_google_index, index_provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (name, json.dumps(target_domains, ensure_ascii=False),
              user_agent, custom_user_agent, threads, timeout,
-             1 if check_google_index else 0)
+             1 if check_google_index else 0, index_provider or "")
         )
         return cur.lastrowid or 0
 
@@ -191,7 +195,7 @@ def delete_task(task_id: int) -> None:
 
 _TASK_FIELDS = frozenset({
     "name", "user_agent", "custom_user_agent", "threads", "timeout",
-    "check_google_index",
+    "check_google_index", "index_provider",
 })
 
 

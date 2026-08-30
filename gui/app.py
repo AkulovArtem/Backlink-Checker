@@ -21,6 +21,7 @@ from core.google_index import (
     PROVIDER_RIVER,
     PROVIDER_STOCK,
     fetch_balance,
+    needs_balance_fetch,
     pick_provider,
 )
 from core.models import CheckConfig
@@ -29,6 +30,7 @@ from core.task_start import (
     can_launch_after_balance,
     is_current_generation,
     is_task_busy,
+    take_finished_worker,
 )
 from db import database as db
 from export.excel_export import export_to_excel
@@ -51,12 +53,26 @@ SCREEN_REPORT = 2
 class _BalanceResolveThread(QThread):
     resolved = pyqtSignal(object, object)
 
+    def __init__(self, preferred: str = "", parent=None):
+        super().__init__(parent)
+        self._preferred = preferred
+
     def run(self):
         river_url = db.get_setting(SETTING_RIVER_URL, "")
         stock_url = db.get_setting(SETTING_STOCK_URL, "")
-        river_bal = fetch_balance(PROVIDER_RIVER, river_url) if river_url else None
-        stock_bal = fetch_balance(PROVIDER_STOCK, stock_url) if stock_url else None
-        self.resolved.emit(*pick_provider(river_url, river_bal, stock_url, stock_bal))
+        river_bal = (
+            fetch_balance(PROVIDER_RIVER, river_url)
+            if river_url and needs_balance_fetch(PROVIDER_RIVER, self._preferred)
+            else None
+        )
+        stock_bal = (
+            fetch_balance(PROVIDER_STOCK, stock_url)
+            if stock_url and needs_balance_fetch(PROVIDER_STOCK, self._preferred)
+            else None
+        )
+        self.resolved.emit(*pick_provider(
+            river_url, river_bal, stock_url, stock_bal, preferred=self._preferred,
+        ))
 
 
 class MainApp(QMainWindow):
@@ -176,10 +192,15 @@ class MainApp(QMainWindow):
 
         donor_urls = [(int(d["id"]), str(d["url"])) for d in donors]
         if check_index:
+            preferred = ""
+            try:
+                preferred = str(task["index_provider"] or "")
+            except (KeyError, IndexError):
+                preferred = ""
             gen = bump_generation(self._start_gen, task_id)
             self._starting.add(task_id)
             self._mark_running_in_ui(task_id)
-            thread = _BalanceResolveThread(self)
+            thread = _BalanceResolveThread(preferred, self)
             thread.resolved.connect(
                 lambda provider, notices, tid=task_id, urls=donor_urls, t=task, domains=target_domains, g=gen:
                 self._on_index_provider_ready(
@@ -250,7 +271,7 @@ class MainApp(QMainWindow):
             lambda result, tid=task_id: self._list_view.update_task_row(tid)
         )
         worker.finished.connect(
-            lambda ok, tid=task_id: self._on_finished(tid, ok)
+            lambda ok, tid=task_id, w=worker: self._on_finished(tid, ok, w)
         )
         worker.start()
 
@@ -313,9 +334,6 @@ class MainApp(QMainWindow):
 
     def retry_failed_task(self, task_id: int):
         """Re-run only donors that previously failed to load (status = not_loaded)."""
-        self._cancel_start(task_id)
-        self._stop_and_reap_worker(task_id)
-
         failed = db.get_failed_donors_for_task(task_id)
         if not failed:
             QMessageBox.information(
@@ -326,6 +344,8 @@ class MainApp(QMainWindow):
             )
             return
 
+        self._cancel_start(task_id)
+        self._stop_and_reap_worker(task_id)
         db.reset_failed_donors(task_id)
         self.start_task(task_id)
         self._list_view.refresh()
@@ -422,8 +442,11 @@ class MainApp(QMainWindow):
         if self._stack.currentIndex() == SCREEN_REPORT:
             self._report_view.refresh()
 
-    def _on_finished(self, task_id: int, success: bool):
-        self._workers.pop(task_id, None)
+    def _on_finished(self, task_id: int, success: bool, worker=None):
+        if worker is None:
+            worker = self.sender()
+        if not take_finished_worker(self._workers, task_id, worker):
+            return
         self._report_refresh_timer.stop()   # cancel any pending throttled refresh
         self._list_view.update_task_row(task_id)
         if (self._stack.currentIndex() == SCREEN_REPORT

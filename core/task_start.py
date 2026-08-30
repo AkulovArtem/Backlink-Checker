@@ -29,3 +29,15 @@ def is_task_busy(
 ) -> bool:
     """True if start/retry must not launch another worker for this task."""
     return closing or has_worker or is_starting or is_stopping
+
+
+def take_finished_worker(workers: dict, task_id: int, worker) -> bool:
+    """Pop ``task_id`` only if ``worker`` is still the active one.
+
+    A queued ``finished`` from a stopped thread must not drop a worker that
+    was started after the old one reaped.
+    """
+    if worker is None or workers.get(task_id) is not worker:
+        return False
+    workers.pop(task_id, None)
+    return True

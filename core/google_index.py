@@ -247,16 +247,26 @@ def canonical_search_endpoint(name: str, api_url: str) -> str:
     return f"https://xmlstock.com/google/xml/?user={user}&key={key}"
 
 
+def needs_balance_fetch(provider: str, preferred: str | None) -> bool:
+    """False if the task picked the other service — skip that HTTP round-trip."""
+    preferred = (preferred or "").strip()
+    if not preferred:
+        return True
+    return provider == preferred
+
+
 def pick_provider(
     river_url: str,
     river_balance: BalanceResult | None,
     stock_url: str,
     stock_balance: BalanceResult | None,
+    preferred: str = "",
 ) -> tuple[IndexProvider | None, list[str]]:
-    """Pick XMLRiver if it has money, else XMLStock. Return notices for the UI."""
+    """Pick a usable provider. If ``preferred`` is set, only that service is used."""
     notices: list[str] = []
     river_url = (river_url or "").strip()
     stock_url = (stock_url or "").strip()
+    preferred = (preferred or "").strip()
 
     def _consider(
         label: str, url: str, bal: BalanceResult | None, name: str
@@ -278,6 +288,25 @@ def pick_provider(
         return IndexProvider(
             name, canonical_search_endpoint(name, url), float(bal.amount)
         )
+
+    if preferred == PROVIDER_STOCK:
+        chosen = _consider("XMLStock", stock_url, stock_balance, PROVIDER_STOCK)
+        if chosen is not None:
+            return chosen, notices
+        notices.append(
+            "Выбран XMLStock, но сервис недоступен. "
+            "Индексация в Google не выполняется."
+        )
+        return None, notices
+    if preferred == PROVIDER_RIVER:
+        chosen = _consider("XMLRiver", river_url, river_balance, PROVIDER_RIVER)
+        if chosen is not None:
+            return chosen, notices
+        notices.append(
+            "Выбран XMLRiver, но сервис недоступен. "
+            "Индексация в Google не выполняется."
+        )
+        return None, notices
 
     chosen = _consider("XMLRiver", river_url, river_balance, PROVIDER_RIVER)
     if chosen is not None:

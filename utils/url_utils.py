@@ -8,15 +8,16 @@ MAX_DONORS = 100_000
 MAX_TARGETS = 50
 
 
-def parse_donor_lines(text: str, limit: int = MAX_DONORS) -> tuple[list[str], int]:
+def parse_donor_lines(text: str) -> tuple[list[str], int]:
     """Split pasted donor text into unique http(s) URLs.
 
     Returns (valid_urls, invalid_count). Invalid lines are those without
     an http/https scheme. Order of first occurrence is preserved.
+    The caller applies MAX_DONORS / remaining-slot caps so it can warn.
     """
     raw = [u.strip() for u in text.splitlines() if u.strip()]
     invalid_count = sum(1 for u in raw if not URL_SCHEME_RE.match(u))
-    valid = list(dict.fromkeys(u for u in raw if URL_SCHEME_RE.match(u)))[:limit]
+    valid = list(dict.fromkeys(u for u in raw if URL_SCHEME_RE.match(u)))
     return valid, invalid_count
 
 
