@@ -166,6 +166,11 @@ class TaskListView(QWidget):
         btn_create.setObjectName("btnCreate")
         btn_create.clicked.connect(self._go_create)
         action_bar.addWidget(btn_create)
+        action_bar.addSpacing(8)
+        btn_settings = QPushButton("Настройки")
+        btn_settings.setObjectName("btnCreate")
+        btn_settings.clicked.connect(self._open_settings)
+        action_bar.addWidget(btn_settings)
         action_bar.addSpacing(12)
         self._theme_btn = ThemeToggle(self._dark_mode)
         action_bar.addWidget(self._theme_btn)
@@ -348,6 +353,12 @@ class TaskListView(QWidget):
     def _go_create(self):
         if self._app:
             self._app.show_create()
+
+    def _open_settings(self):
+        from gui.settings_dialog import SettingsDialog
+
+        dlg = SettingsDialog(self)
+        dlg.exec()
 
     # ── Context menu ──────────────────────────────────────────────────────
 

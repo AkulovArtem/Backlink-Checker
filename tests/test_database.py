@@ -86,6 +86,18 @@ class AddDonorsToTaskTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             db.update_task_fields(self.task_id, status="completed")
 
+    def test_google_index_columns(self):
+        tid = db.create_task("idx", ["example.com"], check_google_index=True)
+        task = db.get_task(tid)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task["check_google_index"], 1)
+        db.create_donors_bulk(tid, ["https://a.example/1"])
+        donor = db.get_donors_for_task(tid)[0]
+        db.update_donor(int(donor["id"]), google_indexed="indexed")
+        refreshed = db.get_donors_for_task(tid)[0]
+        self.assertEqual(refreshed["google_indexed"], "indexed")
+
 
 if __name__ == "__main__":
     unittest.main()

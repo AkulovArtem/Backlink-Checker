@@ -15,6 +15,7 @@ _TASK = {
     "custom_user_agent": None,
     "threads": 8,
     "timeout": 45,
+    "check_google_index": 1,
 }
 
 
@@ -38,6 +39,7 @@ class TaskCreateAppendModeTest(unittest.TestCase):
         self.assertIn("12", view._existing_lbl.text())
         self.assertEqual(view._threads_spin.value(), 8)
         self.assertEqual(view._timeout_spin.value(), 45)
+        self.assertTrue(view._index_check.isChecked())
 
     def test_reset_returns_to_create_mode(self):
         view = TaskCreateView()
@@ -49,6 +51,7 @@ class TaskCreateAppendModeTest(unittest.TestCase):
         self.assertEqual(view._submit_btn.text(), "Создать")
         self.assertFalse(view._targets_edit.isReadOnly())
         self.assertTrue(view._existing_lbl.isHidden())
+        self.assertFalse(view._index_check.isChecked())
 
 
 if __name__ == "__main__":

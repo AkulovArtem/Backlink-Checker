@@ -152,6 +152,8 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
         ("Страниц открыто (Google)", open_count),
         ("Страниц закрыто (Google)", closed_count),
         ("Страниц не определено",    unknown_count),
+        ("В индексе Google (да)",    sum(1 for d in donors if _donor_gindex(d) == "indexed")),
+        ("В индексе Google (нет)",   sum(1 for d in donors if _donor_gindex(d) == "not_indexed")),
     ]
 
     ws.column_dimensions["A"].width = 28
@@ -166,12 +168,20 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
             cell2.data_type = "s"
 
 
+def _donor_gindex(donor) -> str:
+    try:
+        return donor["google_indexed"] or ""
+    except (KeyError, IndexError):
+        return ""
+
+
 def _sheet_donors(wb, donors, backlinks):
     ws = wb.create_sheet("Доноры")
     headers = [
         "URL донора", "HTTP статус", "Title", "Canonical",
         "Внутр. ссылок", "Внешн. ссылок",
         "Индекс Google", "Индекс Yandex", "Индекс Bing", "Индекс Baidu",
+        "В индексе Google",
         "Найдено бэклинков"
     ]
     _write_headers(ws, headers)
@@ -193,6 +203,9 @@ def _sheet_donors(wb, donors, backlinks):
             donor["index_yandex"] or "—",
             donor["index_bing"] or "—",
             donor["index_baidu"] or "—",
+            {"indexed": "Да", "not_indexed": "Нет", "error": "Ошибка"}.get(
+                _donor_gindex(donor), "—"
+            ),
             bl_counts.get(donor["id"], 0),
         ]
         _write_row(ws, row_idx, values)

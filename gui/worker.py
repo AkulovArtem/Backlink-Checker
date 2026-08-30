@@ -70,8 +70,7 @@ class CheckWorker(QThread):
     def _on_donor_result(self, result: DonorResult):
         # Persist to DB — isolated so a DB error never suppresses the UI signal
         try:
-            db.update_donor(
-                result.donor_id,
+            persist = dict(
                 http_status=result.http_status,
                 title=result.title,
                 canonical_url=result.canonical_url,
@@ -86,6 +85,10 @@ class CheckWorker(QThread):
                 status=result.status,
                 error_code=result.error_code,
             )
+            if result.google_indexed is not None:
+                persist["google_indexed"] = result.google_indexed
+                persist["google_index_error"] = result.google_index_error
+            db.update_donor(result.donor_id, **persist)
             db.create_backlinks_bulk(result.donor_id, self._config.task_id, result.backlinks)
         except Exception:
             logger.exception("DB persist error for donor %d (%s)", result.donor_id, result.url)

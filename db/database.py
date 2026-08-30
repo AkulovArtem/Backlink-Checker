@@ -100,20 +100,36 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_backlinks_donor_id
                 ON backlinks(donor_id);
         """)
+        _add_column_if_missing(
+            conn, "tasks", "check_google_index", "INTEGER DEFAULT 0"
+        )
+        _add_column_if_missing(conn, "donors", "google_indexed", "TEXT")
+        _add_column_if_missing(conn, "donors", "google_index_error", "TEXT")
     logger.info("Database initialized at %s", DB_PATH)
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str
+) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()  # nosec B608
+    names = {r[1] for r in rows}
+    if column not in names:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")  # nosec B608
 
 
 # ── Tasks ──────────────────────────────────────────────────────────────────
 
 def create_task(name: str, target_domains: list[str], user_agent: str = "desktop_chrome",
                 custom_user_agent: Optional[str] = None, threads: int = 5,
-                timeout: int = 30) -> int:
+                timeout: int = 30, check_google_index: bool = False) -> int:
     with get_connection() as conn:
         cur = conn.execute(
-            """INSERT INTO tasks (name, target_domains, user_agent, custom_user_agent, threads, timeout)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO tasks (name, target_domains, user_agent, custom_user_agent,
+                                  threads, timeout, check_google_index)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (name, json.dumps(target_domains, ensure_ascii=False),
-             user_agent, custom_user_agent, threads, timeout)
+             user_agent, custom_user_agent, threads, timeout,
+             1 if check_google_index else 0)
         )
         return cur.lastrowid or 0
 
@@ -155,6 +171,7 @@ def delete_task(task_id: int) -> None:
 
 _TASK_FIELDS = frozenset({
     "name", "user_agent", "custom_user_agent", "threads", "timeout",
+    "check_google_index",
 })
 
 
@@ -181,7 +198,8 @@ def reset_task(task_id: int) -> None:
                canonical_url = NULL, internal_links = 0, external_links = 0,
                index_google = NULL, index_yandex = NULL, index_bing = NULL,
                index_baidu = NULL, meta_robots = NULL, x_robots_tag = NULL,
-               error_code = NULL, html_snippet = NULL
+               error_code = NULL, html_snippet = NULL,
+               google_indexed = NULL, google_index_error = NULL
                WHERE task_id = ?""",
             (task_id,)
         )
@@ -294,7 +312,8 @@ def reset_failed_donors(task_id: int) -> None:
                canonical_url = NULL, internal_links = 0, external_links = 0,
                index_google = NULL, index_yandex = NULL, index_bing = NULL,
                index_baidu = NULL, meta_robots = NULL, x_robots_tag = NULL,
-               error_code = NULL, html_snippet = NULL
+               error_code = NULL, html_snippet = NULL,
+               google_indexed = NULL, google_index_error = NULL
                WHERE task_id = ? AND status = 'not_loaded'""",
             (task_id,),
         )
@@ -304,6 +323,7 @@ _DONOR_COLUMNS = frozenset({
     "http_status", "title", "canonical_url", "internal_links", "external_links",
     "index_google", "index_yandex", "index_bing", "index_baidu",
     "meta_robots", "x_robots_tag", "status", "error_code", "html_snippet",
+    "google_indexed", "google_index_error",
 })
 
 
