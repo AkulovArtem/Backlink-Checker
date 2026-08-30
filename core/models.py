@@ -4,6 +4,13 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from core.google_index import IndexProvider
 
+HTML_SNIPPET_MAX = 500
+
+
+def clip_html_snippet(html: str | None) -> str:
+    """Keep a short page excerpt so 100k-donor tasks do not bloat SQLite."""
+    return (html or "")[:HTML_SNIPPET_MAX]
+
 
 @dataclass
 class BacklinkInfo:
@@ -38,8 +45,10 @@ class DonorResult:
     backlinks: list[BacklinkInfo] = field(default_factory=list)
     status: str = "pending"   # pending | found | not_found | not_loaded
     error_code: Optional[str] = None
+    final_url: str = ""
     google_indexed: Optional[str] = None  # indexed | not_indexed | error
     google_index_error: Optional[str] = None
+    html_snippet: str = ""
 
 
 @dataclass

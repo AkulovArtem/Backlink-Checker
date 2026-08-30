@@ -2,6 +2,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Optional, TypedDict
 
 from utils.resource_path import data_path
@@ -9,6 +10,17 @@ from utils.resource_path import data_path
 logger = logging.getLogger(__name__)
 
 DB_PATH = data_path("backlink_checker.db")
+
+
+def format_task_created(created_iso: str) -> str:
+    """SQLite CURRENT_TIMESTAMP is UTC without tzinfo; show local wall time."""
+    try:
+        dt = datetime.fromisoformat(str(created_iso))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(created_iso)
 
 
 class AddDonorsResult(TypedDict):
@@ -153,6 +165,14 @@ def get_all_tasks_with_counts() -> list[sqlite3.Row]:
 def get_task(task_id: int) -> Optional[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+
+
+def parse_target_domains(raw) -> list[str]:
+    """Parse tasks.target_domains JSON. Raises if missing or not a list."""
+    domains = json.loads(raw)
+    if not isinstance(domains, list):
+        raise TypeError("target_domains is not a list")
+    return [str(d) for d in domains if d]
 
 
 def update_task_status(task_id: int, status: str, progress: int = 0) -> None:

@@ -2,7 +2,6 @@
 Screen 1: Task list with search, date filters, sortable table, context menu.
 """
 
-import logging
 from datetime import datetime
 
 from PyQt6.QtCore import QDate, QSortFilterProxyModel, Qt, QUrl
@@ -35,8 +34,6 @@ from PyQt6.QtWidgets import (
 from db import database as db
 from gui.constants import STATUS_COLORS, STATUS_LABELS
 from gui.theme_toggle import ThemeToggle
-
-logger = logging.getLogger(__name__)
 
 COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
 
@@ -212,7 +209,7 @@ class TaskListView(QWidget):
         # Table
         self._model = QStandardItemModel(0, 6, self)
         self._model.setHorizontalHeaderLabels(
-            ["СОЗДАНО", "НАЗВАНИЕ", "ДОНОРОВ", "БЕКЛИНКОВ", "СТАТУС", "ДЕЙСТВИЯ"]
+            ["СОЗДАНО", "НАЗВАНИЕ", "ДОНОРОВ", "БЭКЛИНКОВ", "СТАТУС", "ДЕЙСТВИЯ"]
         )
 
         self._proxy = _TaskFilterProxy(self)
@@ -258,11 +255,7 @@ class TaskListView(QWidget):
 
             # Format created_at
             created_iso = task["created_at"]
-            try:
-                dt = datetime.fromisoformat(created_iso)
-                created_str = dt.strftime("%d.%m.%Y %H:%M")
-            except Exception:
-                created_str = created_iso
+            created_str = db.format_task_created(created_iso)
 
             status_label = STATUS_LABELS.get(status, status)
             if status == "running" and progress > 0:
@@ -371,6 +364,7 @@ class TaskListView(QWidget):
             return
 
         menu = QMenu(self)
+        act_continue     = menu.addAction("Продолжить проверку")
         act_retry        = menu.addAction("Повторить проверку")
         act_retry_failed = menu.addAction("Повторить неудачные")
         act_add_links    = menu.addAction("Добавить ссылки")
@@ -380,7 +374,9 @@ class TaskListView(QWidget):
         act_delete = menu.addAction("Удалить задание")
 
         action = menu.exec(self._table.viewport().mapToGlobal(pos))
-        if action == act_retry and self._app:
+        if action == act_continue and self._app:
+            self._app.continue_task(task_id)
+        elif action == act_retry and self._app:
             self._app.retry_task(task_id)
         elif action == act_retry_failed and self._app:
             self._app.retry_failed_task(task_id)

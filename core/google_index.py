@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
-import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -22,20 +22,21 @@ XMLSTOCK_BALANCE_PATH = "https://xmlstock.com/api/"
 INDEX_CONCURRENCY = 10
 HTTP_TIMEOUT = 25
 MAX_QUERY_LEN = 1400
-
-_NUM_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+INDEX_RETRIES = 3
+RETRYABLE_ERROR_CODES = frozenset({"101", "110", "202", "500"})
 
 
 @dataclass
 class IndexCheckResult:
     status: str  # indexed | not_indexed | error
     error: str = ""
+    retryable: bool = False
 
 
 @dataclass
 class BalanceResult:
     ok: bool
-    amount: Optional[float] = None
+    amount: float | None = None
     error: str = ""
 
     @property
@@ -50,7 +51,7 @@ class IndexProvider:
     balance: float = 0.0
 
 
-def parse_user_key(api_url: str) -> Optional[tuple[str, str]]:
+def parse_user_key(api_url: str) -> tuple[str, str] | None:
     """Extract (user, key) from a personal API URL."""
     raw = (api_url or "").strip()
     if not raw:
@@ -75,8 +76,8 @@ def _walk(elem: ET.Element, name: str):
             yield child
 
 
-def _parse_float(text: str) -> Optional[float]:
-    cleaned = (text or "").strip().replace("\xa0", " ").replace(" ", "")
+def _parse_float(text: str) -> float | None:
+    cleaned = (text or "").strip().replace("\xa0", "").replace(" ", "")
     cleaned = cleaned.replace("₽", "").replace("руб.", "").replace("руб", "")
     cleaned = cleaned.replace(",", ".")
     if not cleaned:
@@ -84,89 +85,73 @@ def _parse_float(text: str) -> Optional[float]:
     try:
         return float(cleaned)
     except ValueError:
-        match = _NUM_RE.search(cleaned)
-        if not match:
-            return None
-        try:
-            return float(match.group(0).replace(",", "."))
-        except ValueError:
-            return None
+        return None
+
+
+def _is_plain_number(text: str) -> bool:
+    return _parse_float(text) is not None and all(
+        ch.isdigit() or ch in ".,-+ ₽\xa0" or ch in "руб."
+        for ch in text.strip()
+    )
 
 
 def parse_balance_body(body: str) -> BalanceResult:
-    """Parse a balance API response (plain number, XML, or JSON-like)."""
+    """Parse XMLRiver (plain number) or XMLStock (JSON.balance) responses."""
     text = (body or "").strip()
     if not text:
         return BalanceResult(ok=False, error="Пустой ответ сервиса")
 
-    lowered = text.lower()
-    if "error" in lowered and _parse_float(text) is None:
-        snippet = re.sub(r"<[^>]+>", " ", text)
-        snippet = " ".join(snippet.split())
-        return BalanceResult(ok=False, error=snippet[:200] or "Ошибка сервиса")
+    if _is_plain_number(text):
+        amount = _parse_float(text)
+        if amount is not None:
+            return BalanceResult(ok=True, amount=amount)
 
-    amount = _parse_float(text)
-    if amount is not None and "<" not in text[:20] and "{" not in text[:20]:
-        return BalanceResult(ok=True, amount=amount)
+    if text.startswith("{") or text.startswith("["):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return BalanceResult(ok=False, error="Некорректный JSON")
+        if not isinstance(data, dict):
+            return BalanceResult(ok=False, error="Некорректный JSON")
+        err = data.get("error")
+        if err not in (None, 0, "0", False, ""):
+            return BalanceResult(ok=False, error=str(err)[:200])
+        for key in ("balance", "Balance"):
+            if key not in data:
+                continue
+            raw = data[key]
+            amount = float(raw) if isinstance(raw, (int, float)) else _parse_float(str(raw))
+            if amount is not None:
+                return BalanceResult(ok=True, amount=amount)
+        return BalanceResult(ok=False, error="В ответе нет поля balance")
 
     if text.startswith("<") or text.startswith("<?xml"):
         try:
             root = ET.fromstring(text)  # nosec B314
         except ET.ParseError:
-            root = None
-        if root is not None:
-            err = next(_walk(root, "error"), None)
-            if err is not None and (err.text or err.get("code")):
-                msg = (err.text or f"Ошибка {err.get('code', '')}").strip()
-                return BalanceResult(ok=False, error=msg)
-            for tag in ("balance", "sum", "amount", "money"):
-                node = next(_walk(root, tag), None)
-                if node is not None and node.text:
-                    parsed = _parse_float(node.text)
-                    if parsed is not None:
-                        return BalanceResult(ok=True, amount=parsed)
+            return BalanceResult(ok=False, error="Некорректный XML")
+        err = next(_walk(root, "error"), None)
+        if err is not None and (err.text or err.get("code")):
+            msg = (err.text or f"Ошибка {err.get('code', '')}").strip()
+            return BalanceResult(ok=False, error=msg[:200])
+        node = next(_walk(root, "balance"), None)
+        if node is not None and node.text:
+            parsed = _parse_float(node.text)
+            if parsed is not None:
+                return BalanceResult(ok=True, amount=parsed)
+        return BalanceResult(ok=False, error="В XML нет баланса")
 
-    try:
-        import json
-
-        data = json.loads(text)
-        found = _json_balance(data)
-        if found is not None:
-            return BalanceResult(ok=True, amount=found)
-        if isinstance(data, dict):
-            err = data.get("error") or data.get("message") or data.get("msg")
-            if err and err not in (0, "0", False):
-                return BalanceResult(ok=False, error=str(err)[:200])
-    except (ValueError, TypeError):
-        pass
-
-    amount = _parse_float(text)
-    if amount is not None:
-        return BalanceResult(ok=True, amount=amount)
+    snippet = " ".join(text.split())[:200]
+    if snippet.lower().startswith("error"):
+        return BalanceResult(ok=False, error=snippet)
     return BalanceResult(ok=False, error="Не удалось разобрать баланс")
 
 
-def _json_balance(data) -> Optional[float]:
-    if isinstance(data, (int, float)):
-        return float(data)
-    if isinstance(data, str):
-        return _parse_float(data)
-    if isinstance(data, dict):
-        for key in ("balance", "Balance", "sum", "amount", "money"):
-            if key in data:
-                parsed = _json_balance(data[key])
-                if parsed is not None:
-                    return parsed
-        for value in data.values():
-            parsed = _json_balance(value)
-            if parsed is not None:
-                return parsed
-    if isinstance(data, list):
-        for item in data:
-            parsed = _json_balance(item)
-            if parsed is not None:
-                return parsed
-    return None
+def _canonical_query(query: str) -> str:
+    if not query:
+        return ""
+    pairs = sorted(parse_qsl(query, keep_blank_values=True))
+    return urlencode(pairs)
 
 
 def _normalize_url(url: str) -> str:
@@ -174,7 +159,9 @@ def _normalize_url(url: str) -> str:
     parsed = urlparse(raw)
     host = parsed.netloc.removeprefix("www.")
     path = parsed.path.rstrip("/") or ""
-    return f"{host}{path}"
+    base = f"{host}{path}"
+    query = _canonical_query(parsed.query)
+    return f"{base}?{query}" if query else base
 
 
 def urls_match(left: str, right: str) -> bool:
@@ -182,8 +169,38 @@ def urls_match(left: str, right: str) -> bool:
     return bool(a) and a == b
 
 
+def index_url_for_check(
+    original: str,
+    final_url: str = "",
+    canonical: str | None = None,
+) -> str:
+    """URL to send to the index API: canonical, else post-redirect, else original."""
+    for candidate in (canonical, final_url, original):
+        if not candidate:
+            continue
+        text = candidate.strip()
+        if text.lower().startswith(("http://", "https://")):
+            return text
+    return original
+
+
+def _doc_urls(root: ET.Element) -> list[str]:
+    """URLs of organic <doc> hits only — not sitelinks or related blocks."""
+    found: list[str] = []
+    for doc in _walk(root, "doc"):
+        for child in list(doc):
+            if _local_tag(child.tag) == "url" and (child.text or "").strip():
+                found.append(child.text.strip())
+                break
+    return found
+
+
 def parse_index_xml(body: str, target_url: str) -> IndexCheckResult:
-    """Interpret XMLRiver / XMLStock search XML as an index check."""
+    """Interpret XMLRiver / XMLStock search XML as an index check.
+
+    Indexed only if an organic <doc><url> matches the target.
+    XMLRiver <found>100</found> is a default stub and must not count.
+    """
     text = (body or "").strip()
     if not text:
         return IndexCheckResult("error", "Пустой ответ сервиса")
@@ -195,28 +212,16 @@ def parse_index_xml(body: str, target_url: str) -> IndexCheckResult:
     err = next(_walk(root, "error"), None)
     if err is not None:
         code = (err.get("code") or "").strip()
+        msg = (err.text or f"Ошибка {code}").strip()
         if code == "15":
             return IndexCheckResult("not_indexed")
-        msg = (err.text or f"Ошибка {code}").strip()
-        return IndexCheckResult("error", msg[:200])
+        return IndexCheckResult(
+            "error",
+            msg[:200],
+            retryable=code in RETRYABLE_ERROR_CODES,
+        )
 
-    doc_urls = [((node.text or "").strip()) for node in _walk(root, "url")]
-    doc_urls = [u for u in doc_urls if u]
-    if any(urls_match(u, target_url) for u in doc_urls):
-        return IndexCheckResult("indexed")
-
-    found_el = next(_walk(root, "found"), None)
-    if found_el is not None and (found_el.text or "").strip():
-        try:
-            n = int(float((found_el.text or "0").strip().replace(",", ".")))
-        except ValueError:
-            n = 0
-        if n == 0:
-            return IndexCheckResult("not_indexed")
-        # inindex=1 / site:url with hits but no exact URL match still counts
-        return IndexCheckResult("indexed")
-
-    if doc_urls:
+    if any(urls_match(u, target_url) for u in _doc_urls(root)):
         return IndexCheckResult("indexed")
     return IndexCheckResult("not_indexed")
 
@@ -244,51 +249,42 @@ def canonical_search_endpoint(name: str, api_url: str) -> str:
 
 def pick_provider(
     river_url: str,
-    river_balance: Optional[BalanceResult],
+    river_balance: BalanceResult | None,
     stock_url: str,
-    stock_balance: Optional[BalanceResult],
-) -> tuple[Optional[IndexProvider], list[str]]:
+    stock_balance: BalanceResult | None,
+) -> tuple[IndexProvider | None, list[str]]:
     """Pick XMLRiver if it has money, else XMLStock. Return notices for the UI."""
     notices: list[str] = []
     river_url = (river_url or "").strip()
     stock_url = (stock_url or "").strip()
 
-    def _usable(url: str, bal: Optional[BalanceResult]) -> bool:
-        return bool(url) and bal is not None and bal.is_usable
+    def _consider(
+        label: str, url: str, bal: BalanceResult | None, name: str
+    ) -> IndexProvider | None:
+        if not url:
+            return None
+        if bal is None:
+            notices.append(f"{label}: не удалось получить баланс.")
+            return None
+        if not bal.ok:
+            notices.append(f"{label}: {bal.error}")
+            return None
+        if bal.amount is None:
+            notices.append(f"{label}: не удалось прочитать сумму баланса.")
+            return None
+        if bal.amount <= 0:
+            notices.append(f"{label}: баланс 0 ₽ — сервис не будет использован.")
+            return None
+        return IndexProvider(
+            name, canonical_search_endpoint(name, url), float(bal.amount)
+        )
 
-    if river_url:
-        if river_balance is None:
-            notices.append("XMLRiver: не удалось получить баланс.")
-        elif not river_balance.ok:
-            notices.append(f"XMLRiver: {river_balance.error}")
-        elif river_balance.amount == 0:
-            notices.append("XMLRiver: баланс 0 ₽ — сервис не будет использован.")
-        elif _usable(river_url, river_balance):
-            return (
-                IndexProvider(
-                    PROVIDER_RIVER,
-                    canonical_search_endpoint(PROVIDER_RIVER, river_url),
-                    float(river_balance.amount or 0),
-                ),
-                notices,
-            )
-
-    if stock_url:
-        if stock_balance is None:
-            notices.append("XMLStock: не удалось получить баланс.")
-        elif not stock_balance.ok:
-            notices.append(f"XMLStock: {stock_balance.error}")
-        elif stock_balance.amount == 0:
-            notices.append("XMLStock: баланс 0 ₽ — сервис не будет использован.")
-        elif _usable(stock_url, stock_balance):
-            return (
-                IndexProvider(
-                    PROVIDER_STOCK,
-                    canonical_search_endpoint(PROVIDER_STOCK, stock_url),
-                    float(stock_balance.amount or 0),
-                ),
-                notices,
-            )
+    chosen = _consider("XMLRiver", river_url, river_balance, PROVIDER_RIVER)
+    if chosen is not None:
+        return chosen, notices
+    chosen = _consider("XMLStock", stock_url, stock_balance, PROVIDER_STOCK)
+    if chosen is not None:
+        return chosen, notices
 
     if river_url or stock_url:
         notices.append(
@@ -327,7 +323,7 @@ def fetch_balance(provider: str, api_url: str) -> BalanceResult:
         return BalanceResult(ok=False, error=f"HTTP {exc.code}")
     except URLError as exc:
         return BalanceResult(ok=False, error=str(exc.reason)[:200])
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Balance fetch failed")
         return BalanceResult(ok=False, error=str(exc)[:200])
     return parse_balance_body(body)
@@ -340,6 +336,21 @@ def _with_query(endpoint: str, extra: dict[str, str]) -> str:
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
+def site_query_target(page_url: str) -> str:
+    """host + path [+ query] without scheme — Google site: does not take https://."""
+    parsed = urlparse(page_url.strip())
+    host = parsed.netloc or parsed.path.split("/")[0]
+    path = parsed.path if parsed.netloc else ""
+    if path == "/":
+        path = ""
+    else:
+        path = path.rstrip("/")
+    target = f"{host}{path}"
+    if parsed.query:
+        target = f"{target}?{parsed.query}"
+    return target
+
+
 def build_index_request_url(provider: IndexProvider, page_url: str) -> str:
     if len(page_url) > MAX_QUERY_LEN:
         raise ValueError("URL длиннее 1400 символов")
@@ -350,28 +361,38 @@ def build_index_request_url(provider: IndexProvider, page_url: str) -> str:
         )
     return _with_query(
         provider.endpoint,
-        {"query": f"site:{page_url}", "nfpr": "1"},
+        {"query": f"site:{site_query_target(page_url)}", "nfpr": "1"},
     )
 
 
 def check_url_indexed(page_url: str, provider: IndexProvider) -> IndexCheckResult:
-    try:
-        url = build_index_request_url(provider, page_url)
-    except ValueError as exc:
-        return IndexCheckResult("error", str(exc))
-    try:
-        body = _http_get(url)
-    except HTTPError as exc:
-        return IndexCheckResult("error", f"HTTP {exc.code}")
-    except URLError as exc:
-        return IndexCheckResult("error", str(exc.reason)[:200])
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Index check failed for %s", page_url)
-        return IndexCheckResult("error", str(exc)[:200])
-    return parse_index_xml(body, page_url)
+    last = IndexCheckResult("error", "Нет ответа")
+    for attempt in range(INDEX_RETRIES):
+        try:
+            url = build_index_request_url(provider, page_url)
+        except ValueError as exc:
+            return IndexCheckResult("error", str(exc))
+        try:
+            body = _http_get(url)
+        except HTTPError as exc:
+            last = IndexCheckResult("error", f"HTTP {exc.code}", retryable=True)
+        except URLError as exc:
+            last = IndexCheckResult(
+                "error", str(exc.reason)[:200], retryable=True
+            )
+        except Exception as exc:
+            logger.exception("Index check failed for %s", page_url)
+            last = IndexCheckResult("error", str(exc)[:200], retryable=True)
+        else:
+            last = parse_index_xml(body, page_url)
+        if last.status != "error" or not last.retryable:
+            return last
+        if attempt + 1 < INDEX_RETRIES:
+            time.sleep(1.5 * (attempt + 1))
+    return last
 
 
-def format_balance_label(result: Optional[BalanceResult], empty_url: bool) -> str:
+def format_balance_label(result: BalanceResult | None, empty_url: bool) -> str:
     if empty_url:
         return "Укажите персональный URL, чтобы увидеть баланс"
     if result is None:

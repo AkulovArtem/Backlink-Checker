@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from gui.task_create_view import TaskCreateView  # noqa: E402
+from utils.url_utils import MAX_DONORS  # noqa: E402
 
 _TASK = {
     "id": 7,
@@ -40,6 +41,23 @@ class TaskCreateAppendModeTest(unittest.TestCase):
         self.assertEqual(view._threads_spin.value(), 8)
         self.assertEqual(view._timeout_spin.value(), 45)
         self.assertTrue(view._index_check.isChecked())
+
+    def test_append_mode_tolerates_corrupt_target_domains(self):
+        view = TaskCreateView()
+        broken = dict(_TASK)
+        broken["target_domains"] = "{not-json"
+        view.enter_append_mode(broken, existing_count=1)
+        self.assertEqual(view._edit_task_id, 7)
+        self.assertEqual(view._targets_edit.toPlainText(), "")
+
+    def test_append_warns_when_over_remaining_cap(self):
+        view = TaskCreateView()
+        view.enter_append_mode(_TASK, existing_count=MAX_DONORS - 1)
+        view._donors_edit.setPlainText("https://a.example/1\nhttps://b.example/2")
+        view._submit()
+        self.assertFalse(view._warn_lbl.isHidden())
+        self.assertIn("лимит", view._warn_lbl.text())
+        self.assertTrue(view._skip_confirmed)
 
     def test_reset_returns_to_create_mode(self):
         view = TaskCreateView()

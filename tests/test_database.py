@@ -1,7 +1,9 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from core.models import HTML_SNIPPET_MAX, clip_html_snippet
 from db import database as db
 
 
@@ -97,6 +99,35 @@ class AddDonorsToTaskTest(unittest.TestCase):
         db.update_donor(int(donor["id"]), google_indexed="indexed")
         refreshed = db.get_donors_for_task(tid)[0]
         self.assertEqual(refreshed["google_indexed"], "indexed")
+
+    def test_html_snippet_roundtrip(self):
+        donors = db.get_donors_for_task(self.task_id)
+        db.update_donor(int(donors[0]["id"]), html_snippet="<p>hi</p>")
+        refreshed = db.get_donors_for_task(self.task_id)[0]
+        self.assertEqual(refreshed["html_snippet"], "<p>hi</p>")
+
+    def test_format_task_created_treats_naive_sqlite_time_as_utc(self):
+        from datetime import datetime, timezone
+
+        utc = datetime(2026, 1, 1, 21, 0, 0, tzinfo=timezone.utc)
+        expected = utc.astimezone().strftime("%d.%m.%Y %H:%M")
+        self.assertEqual(
+            db.format_task_created("2026-01-01 21:00:00"),
+            expected,
+        )
+
+    def test_parse_target_domains_rejects_non_list(self):
+        self.assertEqual(db.parse_target_domains('["example.com"]'), ["example.com"])
+        with self.assertRaises(TypeError):
+            db.parse_target_domains('"example.com"')
+        with self.assertRaises(json.JSONDecodeError):
+            db.parse_target_domains("{not-json")
+
+    def test_clip_html_snippet_truncates(self):
+        self.assertEqual(clip_html_snippet("abc"), "abc")
+        self.assertEqual(clip_html_snippet(None), "")
+        long = "x" * (HTML_SNIPPET_MAX + 20)
+        self.assertEqual(len(clip_html_snippet(long)), HTML_SNIPPET_MAX)
 
 
 if __name__ == "__main__":

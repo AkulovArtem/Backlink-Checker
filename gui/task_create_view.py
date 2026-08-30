@@ -32,6 +32,15 @@ from utils.user_agents import PROFILES
 logger = logging.getLogger(__name__)
 
 
+def _task_target_domains(task) -> list[str]:
+    """Parse task.target_domains JSON; empty list if the stored value is corrupt."""
+    try:
+        return db.parse_target_domains(task["target_domains"])
+    except (json.JSONDecodeError, TypeError, KeyError):
+        logger.error("Corrupted target_domains for task %s", task["id"] if task else "?")
+        return []
+
+
 def _circle_label(n: str) -> QLabel:
     lbl = QLabel(n)
     lbl.setFixedSize(28, 28)
@@ -254,9 +263,11 @@ class TaskCreateView(QWidget):
             self._error_lbl.setVisible(True)
             return
 
-        valid_donors, invalid_count = parse_donor_lines(
-            self._donors_edit.toPlainText(), limit=remaining
+        valid_all, invalid_count = parse_donor_lines(
+            self._donors_edit.toPlainText(), limit=MAX_DONORS
         )
+        valid_donors = valid_all[:remaining]
+        capped_count = len(valid_all) - len(valid_donors)
 
         # Parse & deduplicate targets (cap at 50)
         raw_targets = [
@@ -284,11 +295,20 @@ class TaskCreateView(QWidget):
             return
 
         # Warn about skipped URLs; require a second click to confirm
-        if invalid_count > 0 and not self._skip_confirmed:
+        skip_notes = []
+        if invalid_count > 0:
+            skip_notes.append(
+                f"{invalid_count} URL пропущено — нет схемы http:// или https://"
+            )
+        if capped_count > 0:
+            skip_notes.append(
+                f"{capped_count} URL пропущено — лимит {MAX_DONORS} доноров"
+            )
+        if skip_notes and not self._skip_confirmed:
             action = "добавлено" if is_append else "создано"
             btn_label = "«Добавить и проверить»" if is_append else "«Создать»"
             self._warn_lbl.setText(
-                f"⚠  {invalid_count} URL пропущено — нет схемы http:// или https://. "
+                "⚠  " + ". ".join(skip_notes) + ". "
                 f"Задание будет {action} с {len(valid_donors)} донором(ами). "
                 f"Нажмите {btn_label} ещё раз для подтверждения."
             )
@@ -397,8 +417,7 @@ class TaskCreateView(QWidget):
             f"Можно добавить ещё {remaining}"
         )
 
-        targets = json.loads(task["target_domains"])
-        self._targets_edit.setPlainText("\n".join(targets))
+        self._targets_edit.setPlainText("\n".join(_task_target_domains(task)))
         self._targets_edit.setReadOnly(True)
 
         ua = task["user_agent"] or "desktop_chrome"
@@ -420,8 +439,7 @@ class TaskCreateView(QWidget):
         """Pre-fill the form with data from an existing task for cloning."""
         self._name_edit.setText(f"{task['name']} (копия)")
         self._donors_edit.setPlainText("\n".join(d["url"] for d in donors))
-        targets = json.loads(task["target_domains"])
-        self._targets_edit.setPlainText("\n".join(targets))
+        self._targets_edit.setPlainText("\n".join(_task_target_domains(task)))
         ua = task["user_agent"] or "desktop_chrome"
         for i in range(self._ua_combo.count()):
             if self._ua_combo.itemData(i) == ua:

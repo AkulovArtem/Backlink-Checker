@@ -40,6 +40,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
         self.setMinimumWidth(560)
+        self._closed = False
         self._workers: dict[str, _BalanceWorker] = {}
         self._build_ui()
         self._load()
@@ -108,6 +109,8 @@ class SettingsDialog(QDialog):
         self._refresh_balance(PROVIDER_STOCK)
 
     def _refresh_balance(self, provider: str):
+        if self._closed:
+            return
         url = self._edit_for(provider).text().strip()
         lbl = self._label_for(provider)
         if not url:
@@ -117,15 +120,16 @@ class SettingsDialog(QDialog):
         lbl.setText(format_balance_label(None, empty_url=False))
         lbl.setStyleSheet("")
         old = self._workers.get(provider)
-        if old is not None and old.isRunning():
-            old.finished_ok.disconnect()
-            old.quit()
+        if old is not None:
+            self._abandon_worker(old)
         worker = _BalanceWorker(provider, url, self)
         worker.finished_ok.connect(self._on_balance)
         self._workers[provider] = worker
         worker.start()
 
     def _on_balance(self, provider: str, result):
+        if self._closed:
+            return
         lbl = self._label_for(provider)
         lbl.setText(format_balance_label(result, empty_url=False))
         if result.ok and result.amount is not None and result.amount > 0:
@@ -138,9 +142,22 @@ class SettingsDialog(QDialog):
         db.set_setting(SETTING_STOCK_URL, self._stock_edit.text().strip())
         self.accept()
 
+    def _abandon_worker(self, worker: _BalanceWorker) -> None:
+        try:
+            worker.finished_ok.disconnect()
+        except TypeError:
+            pass
+        worker.setParent(None)
+        worker.finished.connect(worker.deleteLater)
+
     def closeEvent(self, event):
-        for worker in self._workers.values():
-            if worker.isRunning():
-                worker.quit()
-                worker.wait(1000)
+        self._closed = True
+        for edit in (self._river_edit, self._stock_edit):
+            try:
+                edit.editingFinished.disconnect()
+            except TypeError:
+                pass
+        for worker in list(self._workers.values()):
+            self._abandon_worker(worker)
+        self._workers.clear()
         super().closeEvent(event)
