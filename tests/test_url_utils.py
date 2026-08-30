@@ -1,6 +1,6 @@
 import unittest
 
-from utils.url_utils import parse_donor_lines
+from utils.url_utils import normalize_domain, parse_donor_lines
 
 
 class ParseDonorLinesTest(unittest.TestCase):
@@ -39,6 +39,16 @@ class ParseDonorLinesTest(unittest.TestCase):
         valid, invalid = parse_donor_lines("\n  \n\n")
         self.assertEqual(valid, [])
         self.assertEqual(invalid, 0)
+
+
+class NormalizeDomainTest(unittest.TestCase):
+    def test_strips_scheme_www_and_path(self):
+        self.assertEqual(
+            normalize_domain("https://www.Example.com/blog/page?x=1"),
+            "example.com",
+        )
+        self.assertEqual(normalize_domain("example.com/blog"), "example.com")
+        self.assertEqual(normalize_domain("shop.example.com"), "shop.example.com")
 
 
 if __name__ == "__main__":

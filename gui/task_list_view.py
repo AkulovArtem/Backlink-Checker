@@ -356,7 +356,8 @@ class TaskListView(QWidget):
     def _open_settings(self):
         from gui.settings_dialog import SettingsDialog
 
-        dlg = SettingsDialog(self)
+        on_wipe = self._app.wipe_check_data if self._app else None
+        dlg = SettingsDialog(self, on_wipe=on_wipe)
         dlg.exec()
 
     # ── Context menu ──────────────────────────────────────────────────────

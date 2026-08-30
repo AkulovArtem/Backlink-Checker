@@ -30,10 +30,14 @@ def get_domain(url: str) -> str:
 
 
 def normalize_domain(domain: str) -> str:
-    """Strip scheme, www., and trailing slash from a raw domain or URL string."""
-    domain = domain.lower().strip()
-    domain = re.sub(r"^https?://", "", domain)
-    return domain.removeprefix("www.").rstrip("/")
+    """Bare host from a domain or URL (no scheme, www, path, or query)."""
+    raw = (domain or "").strip().lower()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "http://" + raw
+    host = urlparse(raw).netloc
+    return host.removeprefix("www.")
 
 
 def matches_target(href: str, target: str) -> bool:

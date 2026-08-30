@@ -3,10 +3,10 @@
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog,
-    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QVBoxLayout,
 )
 
@@ -17,6 +17,7 @@ from core.google_index import (
     format_balance_label,
 )
 from db import database as db
+from gui.confirm import ask_confirm
 
 SETTING_RIVER_URL = "xmlriver_url"
 SETTING_STOCK_URL = "xmlstock_url"
@@ -36,11 +37,12 @@ class _BalanceWorker(QThread):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, on_wipe=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
         self.setMinimumWidth(560)
         self._closed = False
+        self._on_wipe = on_wipe
         self._workers: dict[str, _BalanceWorker] = {}
         self._build_ui()
         self._load()
@@ -85,21 +87,19 @@ class SettingsDialog(QDialog):
         self._stock_bal.setWordWrap(True)
         root.addWidget(self._stock_bal)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        save_btn = buttons.button(QDialogButtonBox.StandardButton.Save)
-        if save_btn is not None:
-            save_btn.setText("Сохранить")
-        cancel_btn = buttons.button(QDialogButtonBox.StandardButton.Cancel)
-        if cancel_btn is not None:
-            cancel_btn.setText("Отмена")
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
+        self._wipe_btn = QPushButton("Очистить базу")
+        self._wipe_btn.clicked.connect(self._wipe)
+        self._cancel_btn = QPushButton("Отмена")
+        self._cancel_btn.clicked.connect(self.reject)
+        self._save_btn = QPushButton("Сохранить")
+        self._save_btn.setObjectName("btnCreate")
+        self._save_btn.clicked.connect(self._save)
         row = QHBoxLayout()
+        row.addWidget(self._wipe_btn)
         row.addStretch()
-        row.addWidget(buttons)
+        row.addWidget(self._cancel_btn)
+        row.addWidget(self._save_btn)
+        self._button_row = row
         root.addLayout(row)
 
     def _label_for(self, provider: str) -> QLabel:
@@ -146,6 +146,22 @@ class SettingsDialog(QDialog):
     def _save(self):
         db.set_setting(SETTING_RIVER_URL, self._river_edit.text().strip())
         db.set_setting(SETTING_STOCK_URL, self._stock_edit.text().strip())
+        self.accept()
+
+    def _wipe(self):
+        ok = ask_confirm(
+            self,
+            "Очистить базу",
+            "Удалить все задания, доноров и бэклинки безвозвратно?\n\n"
+            "URL сервисов и тема не изменятся.",
+            ok_label="Очистить",
+        )
+        if not ok:
+            return
+        if self._on_wipe is not None:
+            self._on_wipe()
+        else:
+            db.wipe_check_data()
         self.accept()
 
     def _abandon_worker(self, worker: _BalanceWorker) -> None:

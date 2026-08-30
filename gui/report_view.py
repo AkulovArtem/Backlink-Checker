@@ -5,6 +5,7 @@ Screen 3: Task report — summary cards, SE tabs, analytics, donors table, top a
 import json
 import logging
 from collections import defaultdict
+from html import escape as html_escape
 
 from PyQt6.QtCore import QRectF, Qt, QUrl
 from PyQt6.QtGui import (
@@ -55,6 +56,17 @@ _SE_INDEX_COL = {
     "bing":   "index_bing",
     "baidu":  "index_baidu",
 }
+
+
+def donor_url_html(url: str, status_str: str, color: str) -> str:
+    """Rich-text cell for a donor URL; escape so & and quotes stay in the href."""
+    safe_url = html_escape(url or "", quote=True)
+    safe_status = html_escape(str(status_str), quote=True)
+    safe_color = html_escape(color, quote=True)
+    return (
+        f'<b style="color:{safe_color}">{safe_status}</b>  '
+        f'<a href="{safe_url}">{safe_url}</a>'
+    )
 
 
 def matches_google_filter(google_indexed, key: str) -> bool:
@@ -771,8 +783,7 @@ class ReportView(QWidget):
             status_code = donor["http_status"]
             color = HTTP_COLORS.get(int(status_code) // 100, "#888") if status_code else "#888"
             status_str = str(status_code) if status_code else donor["error_code"] or "—"
-            url_cell = QLabel(f'<b style="color:{color}">{status_str}</b>  '
-                              f'<a href="{donor["url"]}">{donor["url"]}</a>')
+            url_cell = QLabel(donor_url_html(donor["url"], status_str, color))
             url_cell.setOpenExternalLinks(True)
             url_cell.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
             url_cell.setWordWrap(True)
