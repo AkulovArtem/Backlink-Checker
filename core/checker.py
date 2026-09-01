@@ -104,10 +104,10 @@ async def _check_one(
         result.status = "not_loaded"
         logger.warning("PWError [%s]: %s", result.error_code, url)
         return result
-    except Exception as exc:
+    except Exception:
         result.status = "not_loaded"
         result.error_code = "UNKNOWN"
-        logger.exception("Unexpected error for %s: %s", url, exc)
+        logger.exception("Unexpected error for %s", url)
         return result
 
     # ── Parse ──────────────────────────────────────────────────────────────
@@ -125,8 +125,8 @@ async def _check_one(
 
         result.status = "found" if result.backlinks else "not_found"
 
-    except Exception as exc:
-        logger.exception("Parse error for %s: %s", url, exc)
+    except Exception:
+        logger.exception("Parse error for %s", url)
         result.status = "not_loaded"
         result.error_code = "PARSE_ERROR"
 
@@ -176,8 +176,8 @@ async def run_check(
                             await page.close()
                     finally:
                         await context.close()
-                except Exception as exc:
-                    logger.exception("Context/page error for %s: %s", url, exc)
+                except Exception:
+                    logger.exception("Context/page error for %s", url)
                     donor_result = DonorResult(
                         donor_id=donor_id, url=url,
                         status="not_loaded", error_code="UNKNOWN",
@@ -204,15 +204,15 @@ async def run_check(
 
             try:
                 result_callback(donor_result)
-            except Exception as cb_exc:
-                logger.exception("result_callback error for %s: %s", url, cb_exc)
+            except Exception:
+                logger.exception("result_callback error for %s", url)
 
             async with lock:
                 done_count += 1
                 try:
                     progress_callback(done_count, total)
-                except Exception as cb_exc:
-                    logger.exception("progress_callback error: %s", cb_exc)
+                except Exception:
+                    logger.exception("progress_callback error")
 
         tasks = [
             asyncio.create_task(process(donor_id, url))
@@ -230,7 +230,7 @@ async def run_check(
         finally:
             try:
                 await browser.close()
-            except Exception as exc:
-                logger.exception("Error closing browser: %s", exc)
+            except Exception:
+                logger.exception("Error closing browser")
 
     logger.info("Check complete: %d/%d", done_count, total)

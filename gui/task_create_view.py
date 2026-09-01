@@ -27,13 +27,22 @@ from PyQt6.QtWidgets import (
 )
 
 from core.google_index import (
+    PROVIDER_JSONSEO,
     PROVIDER_RIVER,
     PROVIDER_STOCK,
     format_balance_label,
 )
+from core.speedyindex import PROVIDER_SPEEDYINDEX
+from core.speedyindex import format_balance_label as format_speedy_balance
 from db import database as db
 from gui.icons import OrDivider
-from gui.settings_dialog import SETTING_RIVER_URL, SETTING_STOCK_URL, _BalanceWorker
+from gui.settings_dialog import (
+    SETTING_JSONSEO_KEY,
+    SETTING_RIVER_URL,
+    SETTING_SPEEDYINDEX_KEY,
+    SETTING_STOCK_URL,
+    _BalanceWorker,
+)
 from utils.url_utils import MAX_DONORS, MAX_TARGETS, parse_donor_lines
 from utils.user_agents import PROFILES
 
@@ -196,7 +205,7 @@ class TaskCreateView(QWidget):
         self._index_check = QCheckBox("Проверка индексации ссылок в Google")
         self._index_check.setToolTip(
             "Проверить в Google только доноров, у которых найден бэклинк. "
-            "URL сервиса задаётся в Настройках."
+            "Сервис задаётся в Настройках."
         )
         self._index_check.toggled.connect(self._on_index_check_toggled)
         root.addWidget(self._index_check)
@@ -207,9 +216,11 @@ class TaskCreateView(QWidget):
         provider_col.setSpacing(6)
         self._river_radio = QRadioButton("XMLRiver")
         self._stock_radio = QRadioButton("XMLStock")
+        self._jsonseo_radio = QRadioButton("JSON SEO")
         self._provider_group = QButtonGroup(self)
         self._provider_group.addButton(self._river_radio)
         self._provider_group.addButton(self._stock_radio)
+        self._provider_group.addButton(self._jsonseo_radio)
         self._river_radio.setChecked(True)
         self._river_bal_lbl = QLabel("")
         self._river_bal_lbl.setObjectName("secondary")
@@ -217,16 +228,49 @@ class TaskCreateView(QWidget):
         self._stock_bal_lbl = QLabel("")
         self._stock_bal_lbl.setObjectName("secondary")
         self._stock_bal_lbl.setWordWrap(True)
+        self._jsonseo_bal_lbl = QLabel("")
+        self._jsonseo_bal_lbl.setObjectName("secondary")
+        self._jsonseo_bal_lbl.setWordWrap(True)
         river_row = QHBoxLayout()
         river_row.addWidget(self._river_radio)
         river_row.addWidget(self._river_bal_lbl, 1)
         stock_row = QHBoxLayout()
         stock_row.addWidget(self._stock_radio)
         stock_row.addWidget(self._stock_bal_lbl, 1)
+        jsonseo_row = QHBoxLayout()
+        jsonseo_row.addWidget(self._jsonseo_radio)
+        jsonseo_row.addWidget(self._jsonseo_bal_lbl, 1)
         provider_col.addLayout(river_row)
         provider_col.addLayout(stock_row)
+        provider_col.addLayout(jsonseo_row)
         self._provider_box.setVisible(False)
         root.addWidget(self._provider_box)
+
+        self._send_index_check = QCheckBox("Отправить на индексацию")
+        self._send_index_check.setToolTip(
+            "После проверки отправить в SpeedyIndex URL с кодом 200, "
+            "найденным акцептором и отсутствием в индексе Google."
+        )
+        self._send_index_check.toggled.connect(self._on_send_index_toggled)
+        root.addWidget(self._send_index_check)
+
+        self._submit_index_box = QWidget()
+        submit_col = QVBoxLayout(self._submit_index_box)
+        submit_col.setContentsMargins(28, 4, 0, 8)
+        submit_col.setSpacing(6)
+        self._speedy_radio = QRadioButton("SpeedyIndex")
+        self._submit_group = QButtonGroup(self)
+        self._submit_group.addButton(self._speedy_radio)
+        self._speedy_radio.setChecked(True)
+        self._speedy_bal_lbl = QLabel("")
+        self._speedy_bal_lbl.setObjectName("secondary")
+        self._speedy_bal_lbl.setWordWrap(True)
+        speedy_row = QHBoxLayout()
+        speedy_row.addWidget(self._speedy_radio)
+        speedy_row.addWidget(self._speedy_bal_lbl, 1)
+        submit_col.addLayout(speedy_row)
+        self._submit_index_box.setVisible(False)
+        root.addWidget(self._submit_index_box)
         self._balance_workers: dict[str, _BalanceWorker] = {}
 
         # Validation error label
@@ -370,6 +414,8 @@ class TaskCreateView(QWidget):
         timeout = self._timeout_spin.value()
         check_index = self._index_check.isChecked()
         index_provider = self._selected_index_provider() if check_index else ""
+        send_index = self._send_index_check.isChecked()
+        index_submitter = PROVIDER_SPEEDYINDEX if send_index else ""
         added = 0
 
         try:
@@ -386,6 +432,8 @@ class TaskCreateView(QWidget):
                     timeout=timeout,
                     check_google_index=1 if check_index else 0,
                     index_provider=index_provider,
+                    send_to_index=1 if send_index else 0,
+                    index_submitter=index_submitter,
                     target_domains=json.dumps(targets, ensure_ascii=False),
                 )
                 added = 0
@@ -408,6 +456,8 @@ class TaskCreateView(QWidget):
                     timeout=timeout,
                     check_google_index=check_index,
                     index_provider=index_provider,
+                    send_to_index=send_index,
+                    index_submitter=index_submitter,
                 )
                 db.create_donors_bulk(task_id, valid_donors)
         except Exception:
@@ -442,8 +492,11 @@ class TaskCreateView(QWidget):
         self._threads_spin.setValue(5)
         self._timeout_spin.setValue(30)
         self._index_check.setChecked(False)
+        self._send_index_check.setChecked(False)
         self._river_radio.setChecked(True)
+        self._speedy_radio.setChecked(True)
         self._provider_box.setVisible(False)
+        self._submit_index_box.setVisible(False)
         self._error_lbl.setVisible(False)
         self._warn_lbl.setVisible(False)
         self._existing_lbl.setVisible(False)
@@ -494,7 +547,9 @@ class TaskCreateView(QWidget):
         except (KeyError, IndexError):
             self._index_check.setChecked(False)
         self._apply_index_provider(task)
+        self._apply_send_to_index(task)
         self._on_index_check_toggled(self._index_check.isChecked())
+        self._on_send_index_toggled(self._send_index_check.isChecked())
 
     def prefill(self, task, donors: list) -> None:
         """Pre-fill the form with data from an existing task for cloning."""
@@ -516,9 +571,13 @@ class TaskCreateView(QWidget):
         except (KeyError, IndexError):
             self._index_check.setChecked(False)
         self._apply_index_provider(task)
+        self._apply_send_to_index(task)
         self._on_index_check_toggled(self._index_check.isChecked())
+        self._on_send_index_toggled(self._send_index_check.isChecked())
 
     def _selected_index_provider(self) -> str:
+        if self._jsonseo_radio.isChecked():
+            return PROVIDER_JSONSEO
         if self._stock_radio.isChecked():
             return PROVIDER_STOCK
         return PROVIDER_RIVER
@@ -529,21 +588,42 @@ class TaskCreateView(QWidget):
             name = str(task["index_provider"] or "")
         except (KeyError, IndexError):
             name = ""
-        if name == PROVIDER_STOCK:
+        if name == PROVIDER_JSONSEO:
+            self._jsonseo_radio.setChecked(True)
+        elif name == PROVIDER_STOCK:
             self._stock_radio.setChecked(True)
         else:
             self._river_radio.setChecked(True)
+
+    def _apply_send_to_index(self, task) -> None:
+        try:
+            self._send_index_check.setChecked(bool(task["send_to_index"]))
+        except (KeyError, IndexError):
+            self._send_index_check.setChecked(False)
+        self._speedy_radio.setChecked(True)
 
     def _on_index_check_toggled(self, checked: bool) -> None:
         self._provider_box.setVisible(checked)
         if checked:
             self._ensure_selected_provider_has_url()
             self._refresh_provider_balances()
+        elif self._send_index_check.isChecked():
+            self._send_index_check.setChecked(False)
+
+    def _on_send_index_toggled(self, checked: bool) -> None:
+        self._submit_index_box.setVisible(checked)
+        if checked:
+            if not self._index_check.isChecked():
+                self._index_check.setChecked(True)
+            self._refresh_submit_balance()
 
     def _ensure_selected_provider_has_url(self) -> None:
         """If the checked radio has no URL but the other does, switch to the other."""
         river = (db.get_setting(SETTING_RIVER_URL, "") or "").strip()
         stock = (db.get_setting(SETTING_STOCK_URL, "") or "").strip()
+        jsonseo = (db.get_setting(SETTING_JSONSEO_KEY, "") or "").strip()
+        if self._jsonseo_radio.isChecked() and jsonseo:
+            return
         if self._stock_radio.isChecked() and stock:
             return
         if self._river_radio.isChecked() and river:
@@ -552,6 +632,8 @@ class TaskCreateView(QWidget):
             self._stock_radio.setChecked(True)
         elif river:
             self._river_radio.setChecked(True)
+        elif jsonseo:
+            self._jsonseo_radio.setChecked(True)
 
     def _refresh_provider_balances(self) -> None:
         self._start_balance_fetch(
@@ -560,14 +642,24 @@ class TaskCreateView(QWidget):
         self._start_balance_fetch(
             PROVIDER_STOCK, db.get_setting(SETTING_STOCK_URL, ""), self._stock_bal_lbl
         )
+        self._start_balance_fetch(
+            PROVIDER_JSONSEO, db.get_setting(SETTING_JSONSEO_KEY, ""), self._jsonseo_bal_lbl
+        )
+
+    def _refresh_submit_balance(self) -> None:
+        self._start_balance_fetch(
+            PROVIDER_SPEEDYINDEX,
+            db.get_setting(SETTING_SPEEDYINDEX_KEY, ""),
+            self._speedy_bal_lbl,
+        )
 
     def _start_balance_fetch(self, provider: str, url: str, lbl: QLabel) -> None:
         url = (url or "").strip()
         if not url:
-            lbl.setText(format_balance_label(None, empty_url=True))
+            lbl.setText(self._format_balance(provider, None, True))
             lbl.setStyleSheet("")
             return
-        lbl.setText(format_balance_label(None, empty_url=False))
+        lbl.setText(self._format_balance(provider, None, False))
         lbl.setStyleSheet("")
         old = self._balance_workers.get(provider)
         if old is not None:
@@ -585,12 +677,25 @@ class TaskCreateView(QWidget):
     def _on_provider_balance(self, provider: str, result) -> None:
         if provider not in self._balance_workers:
             return
-        lbl = self._river_bal_lbl if provider == PROVIDER_RIVER else self._stock_bal_lbl
-        lbl.setText(format_balance_label(result, empty_url=False))
+        lbl = {
+            PROVIDER_RIVER: self._river_bal_lbl,
+            PROVIDER_STOCK: self._stock_bal_lbl,
+            PROVIDER_JSONSEO: self._jsonseo_bal_lbl,
+            PROVIDER_SPEEDYINDEX: self._speedy_bal_lbl,
+        }.get(provider)
+        if lbl is None:
+            return
+        lbl.setText(self._format_balance(provider, result, False))
         if result.ok and result.amount is not None and result.amount > 0:
             lbl.setStyleSheet("color: #00c853;")
         else:
             lbl.setStyleSheet("color: #ff5252;")
+
+    def _format_balance(self, provider: str, result, empty: bool) -> str:
+        if provider == PROVIDER_SPEEDYINDEX:
+            return format_speedy_balance(result, empty)
+        kind = "key" if provider == PROVIDER_JSONSEO else "url"
+        return format_balance_label(result, empty, kind=kind)
 
     def hideEvent(self, event) -> None:
         for worker in list(self._balance_workers.values()):

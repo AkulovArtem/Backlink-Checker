@@ -6,11 +6,15 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PyQt6.QtWidgets import QApplication
 
-from core.google_index import BalanceResult, PROVIDER_RIVER  # noqa: E402
-from db import database as db  # noqa: E402
-from gui.settings_dialog import SettingsDialog  # noqa: E402
+from core.google_index import PROVIDER_RIVER, BalanceResult
+from db import database as db
+from gui.settings_dialog import (
+    SETTING_JSONSEO_KEY,
+    SETTING_SPEEDYINDEX_KEY,
+    SettingsDialog,
+)
 
 
 class SettingsDialogCloseTest(unittest.TestCase):
@@ -54,6 +58,15 @@ class SettingsDialogCloseTest(unittest.TestCase):
         first.wait(2000)
         dlg.close()
         second.wait(2000)
+
+    def test_saves_jsonseo_and_speedyindex_keys(self):
+        dlg = SettingsDialog()
+        dlg._jsonseo_edit.setText(" json-key ")
+        dlg._speedy_edit.setText(" speedy-key ")
+        dlg._save()
+        self.assertEqual(db.get_setting(SETTING_JSONSEO_KEY), "json-key")
+        self.assertEqual(db.get_setting(SETTING_SPEEDYINDEX_KEY), "speedy-key")
+        dlg.close()
 
 
 if __name__ == "__main__":

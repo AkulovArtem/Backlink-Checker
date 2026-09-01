@@ -6,8 +6,8 @@ from PyQt6.QtCore import (
     QPropertyAnimation,
     QRectF,
     Qt,
-    pyqtProperty,
 )
+from PyQt6.QtCore import pyqtProperty  # type: ignore[attr-defined]
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QAbstractButton
 
@@ -47,14 +47,14 @@ class ThemeToggle(QAbstractButton):
         self._anim.setEndValue(1.0 if checked else 0.0)
         self._anim.start()
 
-    @pyqtProperty(float)
-    def toggle_pos(self) -> float:
+    def _get_toggle_pos(self) -> float:
         return self._pos
 
-    @toggle_pos.setter
-    def toggle_pos(self, val: float) -> None:
+    def _set_toggle_pos(self, val: float) -> None:
         self._pos = val
         self.update()
+
+    toggle_pos = pyqtProperty(float, _get_toggle_pos, _set_toggle_pos)
 
     # ── icon drawing ───────────────────────────────────────────────────────
 

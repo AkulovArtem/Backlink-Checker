@@ -24,10 +24,10 @@ class BacklinkInfo:
 @dataclass
 class IndexabilityResult:
     # None = page was never successfully loaded; "open"/"closed" = actual result
-    google: Optional[str] = None
-    yandex: Optional[str] = None
-    bing: Optional[str]   = None
-    baidu: Optional[str]  = None
+    google: str | None = None
+    yandex: str | None = None
+    bing: str | None   = None
+    baidu: str | None  = None
     meta_robots: str = ""
     x_robots_tag: str = ""
 
@@ -36,18 +36,18 @@ class IndexabilityResult:
 class DonorResult:
     donor_id: int
     url: str
-    http_status: Optional[int] = None
+    http_status: int | None = None
     title: str = ""
-    canonical_url: Optional[str] = None
+    canonical_url: str | None = None
     internal_links: int = 0
     external_links: int = 0
     indexability: IndexabilityResult = field(default_factory=IndexabilityResult)
     backlinks: list[BacklinkInfo] = field(default_factory=list)
     status: str = "pending"   # pending | found | not_found | not_loaded
-    error_code: Optional[str] = None
+    error_code: str | None = None
     final_url: str = ""
-    google_indexed: Optional[str] = None  # indexed | not_indexed | error
-    google_index_error: Optional[str] = None
+    google_indexed: str | None = None  # indexed | not_indexed | error
+    google_index_error: str | None = None
     html_snippet: str = ""
 
 
