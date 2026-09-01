@@ -3,7 +3,7 @@ PyQt6==6.11.0
 playwright==1.62.0
 beautifulsoup4==4.15.0
 openpyxl==3.1.5
-lxml==6.1.1
+lxml==6.1.2
 
 # Build
 pyinstaller==6.22.2

@@ -1,0 +1,22 @@
+target-version = "py313"
+src = ["core", "db", "gui", "export", "utils", "tests"]
+
+[lint]
+select = ["E4", "E7", "E9", "F", "SIM", "C4", "RUF", "TRY"]
+# Broad except Exception is intentional around Playwright, Excel cells, and URL parse.
+ignore = [
+    "BLE001",
+    "S110",
+    "DTZ007",
+    "TRY300",
+    "TRY301",
+    "TRY002",
+    "TRY003",
+    "TRY400",
+    "RUF001",  # Russian UI strings look like Latin to this rule
+    "RUF002",
+    "RUF005",
+    "SIM105",  # try/except TypeError on Qt disconnect is clearer
+    "SIM108",
+    "E402",    # main.py configures logging before importing the app
+]
