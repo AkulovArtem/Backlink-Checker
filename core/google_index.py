@@ -15,15 +15,20 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_RIVER = "xmlriver"
 PROVIDER_STOCK = "xmlstock"
+PROVIDER_JSONSEO = "jsonseo"
 
 XMLRIVER_BALANCE_PATH = "https://xmlriver.com/api/get_balance/"
 XMLSTOCK_BALANCE_PATH = "https://xmlstock.com/api/"
+JSONSEO_BALANCE_PATH = "https://jsonseo.ru/api/balance"
+JSONSEO_SEARCH_PATH = "https://jsonseo.ru/api/google/xml"
 
 INDEX_CONCURRENCY = 10
-HTTP_TIMEOUT = 25
+HTTP_TIMEOUT = 45
 MAX_QUERY_LEN = 1400
 INDEX_RETRIES = 3
-RETRYABLE_ERROR_CODES = frozenset({"101", "110", "202", "500"})
+RETRYABLE_ERROR_CODES = frozenset({"20", "55", "101", "110", "202", "500"})
+TRANSIENT_ERROR_MARKERS = ("временно недоступен", "повторите", "try again")
+NON_RETRYABLE_HTTP = frozenset({401, 402, 403, 404, 422})
 
 
 @dataclass
@@ -66,6 +71,18 @@ def parse_user_key(api_url: str) -> tuple[str, str] | None:
     return None
 
 
+def extract_api_key(value: str) -> str:
+    """Raw API key, or ``key=`` from a URL / query string."""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if "://" in raw or "=" in raw:
+        parsed = urlparse(raw if "://" in raw else "http://placeholder/?" + raw.lstrip("?"))
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        return (query.get("key") or "").strip()
+    return raw
+
+
 def _local_tag(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
@@ -106,7 +123,7 @@ def parse_balance_body(body: str) -> BalanceResult:
         if amount is not None:
             return BalanceResult(ok=True, amount=amount)
 
-    if text.startswith("{") or text.startswith("["):
+    if text.startswith(("{", "[")):
         try:
             data = json.loads(text)
         except ValueError:
@@ -125,7 +142,7 @@ def parse_balance_body(body: str) -> BalanceResult:
                 return BalanceResult(ok=True, amount=amount)
         return BalanceResult(ok=False, error="В ответе нет поля balance")
 
-    if text.startswith("<") or text.startswith("<?xml"):
+    if text.startswith(("<", "<?xml")):
         try:
             root = ET.fromstring(text)  # nosec B314
         except ET.ParseError:
@@ -215,10 +232,14 @@ def parse_index_xml(body: str, target_url: str) -> IndexCheckResult:
         msg = (err.text or f"Ошибка {code}").strip()
         if code == "15":
             return IndexCheckResult("not_indexed")
+        lower = msg.lower()
+        retryable = code in RETRYABLE_ERROR_CODES or (
+            not code and any(marker in lower for marker in TRANSIENT_ERROR_MARKERS)
+        )
         return IndexCheckResult(
             "error",
             msg[:200],
-            retryable=code in RETRYABLE_ERROR_CODES,
+            retryable=retryable,
         )
 
     if any(urls_match(u, target_url) for u in _doc_urls(root)):
@@ -242,6 +263,14 @@ def canonical_search_endpoint(name: str, api_url: str) -> str:
             return raw
         scheme = parsed.scheme or "https"
         return f"{scheme}://{parsed.netloc}/google/xml/?user={user}&key={key}"
+    if name == PROVIDER_JSONSEO:
+        key_only = extract_api_key(raw) or key
+        if "jsonseo.ru" in host and "/google/xml" in (parsed.path or ""):
+            if key_only and "key=" not in (parsed.query or ""):
+                sep = "&" if parsed.query else "?"
+                return f"{raw}{sep}key={key_only}"
+            return raw
+        return f"{JSONSEO_SEARCH_PATH}?key={key_only}"
     if name == PROVIDER_RIVER:
         return f"http://xmlriver.com/search/xml?user={user}&key={key}"
     return f"https://xmlstock.com/google/xml/?user={user}&key={key}"
@@ -261,11 +290,14 @@ def pick_provider(
     stock_url: str,
     stock_balance: BalanceResult | None,
     preferred: str = "",
+    jsonseo_key: str = "",
+    jsonseo_balance: BalanceResult | None = None,
 ) -> tuple[IndexProvider | None, list[str]]:
     """Pick a usable provider. If ``preferred`` is set, only that service is used."""
     notices: list[str] = []
     river_url = (river_url or "").strip()
     stock_url = (stock_url or "").strip()
+    jsonseo_key = (jsonseo_key or "").strip()
     preferred = (preferred or "").strip()
 
     def _consider(
@@ -289,6 +321,15 @@ def pick_provider(
             name, canonical_search_endpoint(name, url), float(bal.amount)
         )
 
+    if preferred == PROVIDER_JSONSEO:
+        chosen = _consider("JSON SEO", jsonseo_key, jsonseo_balance, PROVIDER_JSONSEO)
+        if chosen is not None:
+            return chosen, notices
+        notices.append(
+            "Выбран JSON SEO, но сервис недоступен. "
+            "Индексация в Google не выполняется."
+        )
+        return None, notices
     if preferred == PROVIDER_STOCK:
         chosen = _consider("XMLStock", stock_url, stock_balance, PROVIDER_STOCK)
         if chosen is not None:
@@ -328,16 +369,37 @@ def pick_provider(
     return None, notices
 
 
-def _http_get(url: str) -> str:
+def _http_get(url: str, headers: dict[str, str] | None = None) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("Разрешены только http/https URL")
-    req = Request(url, headers={"User-Agent": "BacklinkChecker/1.4"})
-    with urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # nosec B310
-        return resp.read().decode("utf-8", errors="replace")
+    req_headers = {"User-Agent": "BacklinkChecker/1.6"}
+    if headers:
+        req_headers.update(headers)
+    req = Request(url, headers=req_headers)
+    try:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # nosec B310
+            return resp.read().decode("utf-8", errors="replace")
+    except TimeoutError as exc:
+        raise URLError(str(exc) or "timeout") from exc
 
 
 def fetch_balance(provider: str, api_url: str) -> BalanceResult:
+    if provider == PROVIDER_JSONSEO:
+        key = extract_api_key(api_url)
+        if not key:
+            return BalanceResult(ok=False, error="Не указан API-ключ")
+        url = JSONSEO_BALANCE_PATH + "?" + urlencode({"key": key})
+        try:
+            body = _http_get(url, headers={"Authorization": f"Bearer {key}"})
+        except HTTPError as exc:
+            return BalanceResult(ok=False, error=f"HTTP {exc.code}")
+        except URLError as exc:
+            return BalanceResult(ok=False, error=str(exc.reason)[:200])
+        except Exception as exc:
+            logger.exception("Balance fetch failed")
+            return BalanceResult(ok=False, error=str(exc)[:200])
+        return parse_balance_body(body)
     creds = parse_user_key(api_url)
     if not creds:
         return BalanceResult(ok=False, error="В URL нет параметров user и key")
@@ -408,7 +470,11 @@ def check_url_indexed(page_url: str, provider: IndexProvider) -> IndexCheckResul
         try:
             body = _http_get(url)
         except HTTPError as exc:
-            last = IndexCheckResult("error", f"HTTP {exc.code}", retryable=True)
+            last = IndexCheckResult(
+                "error",
+                f"HTTP {exc.code}",
+                retryable=exc.code not in NON_RETRYABLE_HTTP,
+            )
         except URLError as exc:
             last = IndexCheckResult(
                 "error", str(exc.reason)[:200], retryable=True
@@ -425,8 +491,12 @@ def check_url_indexed(page_url: str, provider: IndexProvider) -> IndexCheckResul
     return last
 
 
-def format_balance_label(result: BalanceResult | None, empty_url: bool) -> str:
+def format_balance_label(
+    result: BalanceResult | None, empty_url: bool, kind: str = "url"
+) -> str:
     if empty_url:
+        if kind == "key":
+            return "Укажите API-ключ, чтобы увидеть баланс"
         return "Укажите персональный URL, чтобы увидеть баланс"
     if result is None:
         return "Загрузка баланса…"

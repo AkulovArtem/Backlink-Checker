@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -136,6 +137,43 @@ def _donor_html_snippet(donor) -> str:
         return ""
 
 
+def _donor_submitted_at(donor) -> str:
+    try:
+        return donor["index_submitted_at"] or ""
+    except (KeyError, IndexError):
+        return ""
+
+
+def _task_send_label(task) -> str:
+    try:
+        if not task["send_to_index"]:
+            return "Нет"
+    except (KeyError, IndexError):
+        return "Нет"
+    try:
+        name = str(task["index_submitter"] or "").strip()
+    except (KeyError, IndexError):
+        name = ""
+    if name == "speedyindex":
+        return "SpeedyIndex"
+    return name or "Да"
+
+
+def _format_submitted_at(raw: str) -> str:
+    if not raw:
+        return "—"
+    text = str(raw).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return "—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().strftime("%d.%m.%Y %H:%M")
+
+
 def _robots_label(value) -> str:
     if not value:
         return "—"
@@ -202,6 +240,9 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
         ("В индексе Google (нет)",   g_no),
         ("В индексе Google (ошибка)", g_err),
         ("В индексе Google (не проверялось)", g_skip),
+        ("Отправка на индексацию",   _task_send_label(task)),
+        ("Доноров отправлено на индексацию",
+         sum(1 for d in donors if _donor_submitted_at(d))),
     ]
 
     ws.column_dimensions["A"].width = 36
@@ -223,6 +264,7 @@ def _sheet_donors(wb, donors, backlinks):
         "Внутр. ссылок", "Внешн. ссылок",
         "Robots Google", "Robots Yandex", "Robots Bing", "Robots Baidu",
         "В индексе Google", "Ошибка индекса Google",
+        "Отправлено на индексацию", "Дата отправки на индексацию",
         "Найдено бэклинков"
     ]
     _write_headers(ws, headers)
@@ -247,6 +289,8 @@ def _sheet_donors(wb, donors, backlinks):
             _robots_label(donor["index_baidu"]),
             _gindex_label(_donor_gindex(donor)),
             _donor_gindex_error(donor),
+            "Да" if _donor_submitted_at(donor) else "Нет",
+            _format_submitted_at(_donor_submitted_at(donor)),
             bl_counts.get(donor["id"], 0),
         ]
         _write_row(ws, row_idx, values)
@@ -255,7 +299,7 @@ def _sheet_donors(wb, donors, backlinks):
         http_fill = _http_fill(http)
         if http_fill:
             status_cell.fill = http_fill
-        for col in (8, 9, 10, 11, 12):
+        for col in (8, 9, 10, 11, 12, 13):
             cell = ws.cell(row=row_idx, column=col)
             fill = _value_fill(cell.value)
             if fill:

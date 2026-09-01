@@ -70,8 +70,8 @@ class CheckWorker(QThread):
             else:
                 db.update_task_status(self._config.task_id, "completed", 100)
                 self.finished.emit(True)
-        except Exception as exc:
-            logger.exception("Worker error: %s", exc)
+        except Exception:
+            logger.exception("Worker error")
             db.update_task_status(self._config.task_id, "error", 0)
             self.finished.emit(False)
         finally:
@@ -87,22 +87,23 @@ class CheckWorker(QThread):
     def _on_donor_result(self, result: DonorResult):
         # Persist to DB — isolated so a DB error never suppresses the UI signal
         try:
-            persist = dict(
-                http_status=result.http_status,
-                title=result.title,
-                canonical_url=result.canonical_url,
-                internal_links=result.internal_links,
-                external_links=result.external_links,
-                index_google=result.indexability.google,
-                index_yandex=result.indexability.yandex,
-                index_bing=result.indexability.bing,
-                index_baidu=result.indexability.baidu,
-                meta_robots=result.indexability.meta_robots,
-                x_robots_tag=result.indexability.x_robots_tag,
-                status=result.status,
-                error_code=result.error_code,
-                html_snippet=result.html_snippet or None,
-            )
+            persist = {
+                "http_status": result.http_status,
+                "title": result.title,
+                "canonical_url": result.canonical_url,
+                "final_url": result.final_url or None,
+                "internal_links": result.internal_links,
+                "external_links": result.external_links,
+                "index_google": result.indexability.google,
+                "index_yandex": result.indexability.yandex,
+                "index_bing": result.indexability.bing,
+                "index_baidu": result.indexability.baidu,
+                "meta_robots": result.indexability.meta_robots,
+                "x_robots_tag": result.indexability.x_robots_tag,
+                "status": result.status,
+                "error_code": result.error_code,
+                "html_snippet": result.html_snippet or None,
+            }
             if result.google_indexed is not None:
                 persist["google_indexed"] = result.google_indexed
                 persist["google_index_error"] = result.google_index_error

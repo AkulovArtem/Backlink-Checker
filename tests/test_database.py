@@ -110,6 +110,63 @@ class AddDonorsToTaskTest(unittest.TestCase):
         assert task is not None
         self.assertEqual(task["index_provider"], "xmlstock")
 
+    def test_create_task_stores_send_to_index(self):
+        tid = db.create_task(
+            "idx",
+            ["example.com"],
+            check_google_index=True,
+            index_provider="jsonseo",
+            send_to_index=True,
+            index_submitter="speedyindex",
+        )
+        task = db.get_task(tid)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task["send_to_index"], 1)
+        self.assertEqual(task["index_submitter"], "speedyindex")
+
+    def test_final_url_roundtrip_and_reset(self):
+        donors = db.get_donors_for_task(self.task_id)
+        db.update_donor(
+            int(donors[0]["id"]),
+            final_url="https://www.a.example/1",
+        )
+        self.assertEqual(
+            db.get_donors_for_task(self.task_id)[0]["final_url"],
+            "https://www.a.example/1",
+        )
+        db.reset_task(self.task_id)
+        self.assertIsNone(db.get_donors_for_task(self.task_id)[0]["final_url"])
+
+    def test_index_submit_query_omits_html_snippet(self):
+        donors = db.get_donors_for_task(self.task_id)
+        db.update_donor(int(donors[0]["id"]), html_snippet="<p>secret</p>")
+        rows = db.get_donors_for_index_submit(self.task_id)
+        self.assertTrue(rows)
+        keys = set(rows[0].keys())
+        self.assertNotIn("html_snippet", keys)
+        self.assertIn("final_url", keys)
+        self.assertIn("google_indexed", keys)
+
+    def test_mark_donors_submitted_updates_all_in_one_go(self):
+        donors = db.get_donors_for_task(self.task_id)
+        ids = [int(d["id"]) for d in donors]
+        db.mark_donors_submitted(ids, "2026-01-01T00:00:00Z")
+        stamps = [d["index_submitted_at"] for d in db.get_donors_for_task(self.task_id)]
+        self.assertEqual(stamps, ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"])
+
+    def test_index_submitted_at_roundtrip_and_reset(self):
+        tid = db.create_task("idx", ["example.com"])
+        db.create_donors_bulk(tid, ["https://a.example/1"])
+        donor = db.get_donors_for_task(tid)[0]
+        db.update_donor(int(donor["id"]), index_submitted_at="2026-01-01T00:00:00Z")
+        self.assertEqual(
+            db.get_donors_for_task(tid)[0]["index_submitted_at"],
+            "2026-01-01T00:00:00Z",
+        )
+        db.reset_task(tid)
+        self.assertIsNone(db.get_donors_for_task(tid)[0]["index_submitted_at"])
+
     def test_html_snippet_roundtrip(self):
         donors = db.get_donors_for_task(self.task_id)
         db.update_donor(int(donors[0]["id"]), html_snippet="<p>hi</p>")

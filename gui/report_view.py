@@ -213,6 +213,9 @@ class ReportView(QWidget):
         self._index_btns: dict[str, QPushButton] = {}
         self._status_btns: dict[str, QPushButton] = {}
         self._google_btns: dict[str, QPushButton] = {}
+        self._data_tabs: QTabWidget | None = None
+        self._donor_search: QLineEdit | None = None
+        self._bl_search: QLineEdit | None = None
         self._build_ui()
 
     def set_app(self, app):
@@ -272,9 +275,15 @@ class ReportView(QWidget):
             _donor_search_text = ""
             _bl_search_text = ""
         else:
-            _active_tab = self._data_tabs.currentIndex() if hasattr(self, "_data_tabs") else 0
-            _donor_search_text = self._donor_search.text() if hasattr(self, "_donor_search") else ""
-            _bl_search_text = self._bl_search.text() if hasattr(self, "_bl_search") else ""
+            _active_tab = (
+                self._data_tabs.currentIndex() if self._data_tabs is not None else 0
+            )
+            _donor_search_text = (
+                self._donor_search.text() if self._donor_search is not None else ""
+            )
+            _bl_search_text = (
+                self._bl_search.text() if self._bl_search is not None else ""
+            )
         self._clear()
 
         task = db.get_task(task_id)
@@ -561,9 +570,9 @@ class ReportView(QWidget):
         self._root.addWidget(self._data_tabs)
 
         # Restore search text lost when widgets were recreated during refresh
-        if _donor_search_text:
+        if _donor_search_text and self._donor_search is not None:
             self._donor_search.setText(_donor_search_text)
-        if _bl_search_text:
+        if _bl_search_text and self._bl_search is not None:
             self._bl_search.setText(_bl_search_text)
 
     # ── Domains tab ───────────────────────────────────────────────────────
@@ -759,9 +768,11 @@ class ReportView(QWidget):
                 _se_col_filter = _SE_INDEX_COL.get(self._current_se, "index_google")
                 if not matches_robots_filter(donor[_se_col_filter], self._donor_filter_index):
                     continue
-            if self._donor_filter_status != "all":
-                if donor["status"] != self._donor_filter_status:
-                    continue
+            if (
+                self._donor_filter_status != "all"
+                and donor["status"] != self._donor_filter_status
+            ):
+                continue
             try:
                 g_raw = donor["google_indexed"]
             except (KeyError, IndexError):
@@ -919,7 +930,7 @@ class ReportView(QWidget):
 
     def _populate_backlinks_table(self, backlinks: list, donor_map: dict) -> None:
         search_text = ""
-        if hasattr(self, "_bl_search"):
+        if self._bl_search is not None:
             search_text = self._bl_search.text().lower()
 
         self._bl_table.setSortingEnabled(False)
@@ -1158,7 +1169,7 @@ class ReportView(QWidget):
 
     # ── Actions ───────────────────────────────────────────────────────────
 
-    def _show_actions_menu(self, btn: QPushButton):
+    def _actions_menu(self) -> QMenu:
         menu = QMenu(self)
         menu.addAction("Продолжить проверку",
                        lambda: self._app and self._app.continue_task(self._task_id))
@@ -1172,8 +1183,14 @@ class ReportView(QWidget):
                        lambda: self._app and self._app.clone_task(self._task_id))
         menu.addAction("Экспортировать в .xlsx",
                        lambda: self._app and self._app.export_task(self._task_id))
+        menu.addAction("Отправить на индексацию",
+                       lambda: self._app and self._app.send_task_to_index(self._task_id))
         menu.addSeparator()
         menu.addAction("Удалить задание", self._confirm_delete)
+        return menu
+
+    def _show_actions_menu(self, btn: QPushButton):
+        menu = self._actions_menu()
         menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _confirm_delete(self) -> None:

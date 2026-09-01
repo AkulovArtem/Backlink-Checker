@@ -8,11 +8,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication, QPushButton
 
-from core.google_index import BalanceResult
+from core.google_index import PROVIDER_JSONSEO, BalanceResult
+from core.speedyindex import PROVIDER_SPEEDYINDEX
 from db import database as db
 from gui.confirm import make_confirm_dialog
 from gui.settings_dialog import (
+    SETTING_JSONSEO_KEY,
     SETTING_RIVER_URL,
+    SETTING_SPEEDYINDEX_KEY,
     SETTING_STOCK_URL,
     SettingsDialog,
 )
@@ -188,6 +191,56 @@ class TaskCreateAppendModeTest(unittest.TestCase):
         view = TaskCreateView()
         view.enter_append_mode(_TASK, existing_count=1)
         self.assertTrue(view._stock_radio.isChecked())
+        for worker in list(view._balance_workers.values()):
+            worker.wait(2000)
+
+    @patch(
+        "gui.settings_dialog.fetch_balance",
+        return_value=BalanceResult(ok=True, amount=10),
+    )
+    def test_index_check_can_select_jsonseo(self, _mock):
+        db.set_setting(SETTING_JSONSEO_KEY, "abc")
+        view = TaskCreateView()
+        view._index_check.setChecked(True)
+        view._jsonseo_radio.setChecked(True)
+        self.assertEqual(view._selected_index_provider(), PROVIDER_JSONSEO)
+        for worker in list(view._balance_workers.values()):
+            worker.wait(2000)
+
+    def test_send_to_index_enables_google_check(self):
+        view = TaskCreateView()
+        self.assertFalse(view._index_check.isChecked())
+        view._send_index_check.setChecked(True)
+        self.assertTrue(view._index_check.isChecked())
+        self.assertTrue(view._speedy_radio.isChecked())
+        self.assertFalse(view._submit_index_box.isHidden())
+
+    def test_unchecking_google_check_disables_send(self):
+        view = TaskCreateView()
+        view._send_index_check.setChecked(True)
+        view._index_check.setChecked(False)
+        self.assertFalse(view._send_index_check.isChecked())
+
+    @patch(
+        "gui.settings_dialog.fetch_balance",
+        return_value=BalanceResult(ok=True, amount=10),
+    )
+    def test_submit_stores_jsonseo_and_speedyindex(self, _mock):
+        db.set_setting(SETTING_JSONSEO_KEY, "abc")
+        db.set_setting(SETTING_SPEEDYINDEX_KEY, "def")
+        view = TaskCreateView()
+        view.set_app(_FakeApp())
+        view._name_edit.setText("live")
+        view._donors_edit.setPlainText("https://a.example/1")
+        view._targets_edit.setPlainText("example.com")
+        view._index_check.setChecked(True)
+        view._jsonseo_radio.setChecked(True)
+        view._send_index_check.setChecked(True)
+        view._submit()
+        task = db.get_all_tasks_with_counts()[0]
+        self.assertEqual(task["index_provider"], PROVIDER_JSONSEO)
+        self.assertEqual(task["send_to_index"], 1)
+        self.assertEqual(task["index_submitter"], PROVIDER_SPEEDYINDEX)
         for worker in list(view._balance_workers.values()):
             worker.wait(2000)
 

@@ -1,4 +1,4 @@
-"""Application settings: XMLRiver / XMLStock API URLs and live balance."""
+"""Application settings: index-check and indexer API credentials."""
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -11,16 +11,22 @@ from PyQt6.QtWidgets import (
 )
 
 from core.google_index import (
+    PROVIDER_JSONSEO,
     PROVIDER_RIVER,
     PROVIDER_STOCK,
     fetch_balance,
     format_balance_label,
 )
+from core.speedyindex import PROVIDER_SPEEDYINDEX
+from core.speedyindex import fetch_balance as fetch_speedy_balance
+from core.speedyindex import format_balance_label as format_speedy_balance
 from db import database as db
 from gui.confirm import ask_confirm
 
 SETTING_RIVER_URL = "xmlriver_url"
 SETTING_STOCK_URL = "xmlstock_url"
+SETTING_JSONSEO_KEY = "jsonseo_key"
+SETTING_SPEEDYINDEX_KEY = "speedyindex_key"
 
 
 class _BalanceWorker(QThread):
@@ -32,7 +38,10 @@ class _BalanceWorker(QThread):
         self._url = url
 
     def run(self):
-        result = fetch_balance(self._provider, self._url)
+        if self._provider == PROVIDER_SPEEDYINDEX:
+            result = fetch_speedy_balance(self._url)
+        else:
+            result = fetch_balance(self._provider, self._url)
         self.finished_ok.emit(self._provider, result)
 
 
@@ -52,8 +61,9 @@ class SettingsDialog(QDialog):
         root.setSpacing(12)
 
         hint = QLabel(
-            "Вставьте персональный URL из кабинета сервиса "
-            "(содержит user и key). Достаточно одного сервиса."
+            "Для XMLRiver и XMLStock вставьте персональный URL из кабинета "
+            "(user и key). Для JSON SEO и SpeedyIndex — API-ключ. "
+            "Для проверки индексации достаточно одного сервиса."
         )
         hint.setObjectName("secondary")
         hint.setWordWrap(True)
@@ -87,6 +97,30 @@ class SettingsDialog(QDialog):
         self._stock_bal.setWordWrap(True)
         root.addWidget(self._stock_bal)
 
+        root.addWidget(QLabel("JSON SEO"))
+        self._jsonseo_edit = QLineEdit()
+        self._jsonseo_edit.setPlaceholderText("API-ключ JSON SEO")
+        self._jsonseo_edit.editingFinished.connect(
+            lambda: self._refresh_balance(PROVIDER_JSONSEO)
+        )
+        root.addWidget(self._jsonseo_edit)
+        self._jsonseo_bal = QLabel("")
+        self._jsonseo_bal.setObjectName("secondary")
+        self._jsonseo_bal.setWordWrap(True)
+        root.addWidget(self._jsonseo_bal)
+
+        root.addWidget(QLabel("SpeedyIndex"))
+        self._speedy_edit = QLineEdit()
+        self._speedy_edit.setPlaceholderText("API-ключ SpeedyIndex")
+        self._speedy_edit.editingFinished.connect(
+            lambda: self._refresh_balance(PROVIDER_SPEEDYINDEX)
+        )
+        root.addWidget(self._speedy_edit)
+        self._speedy_bal = QLabel("")
+        self._speedy_bal.setObjectName("secondary")
+        self._speedy_bal.setWordWrap(True)
+        root.addWidget(self._speedy_bal)
+
         self._wipe_btn = QPushButton("Очистить базу")
         self._wipe_btn.clicked.connect(self._wipe)
         self._cancel_btn = QPushButton("Отмена")
@@ -103,16 +137,36 @@ class SettingsDialog(QDialog):
         root.addLayout(row)
 
     def _label_for(self, provider: str) -> QLabel:
-        return self._river_bal if provider == PROVIDER_RIVER else self._stock_bal
+        return {
+            PROVIDER_RIVER: self._river_bal,
+            PROVIDER_STOCK: self._stock_bal,
+            PROVIDER_JSONSEO: self._jsonseo_bal,
+            PROVIDER_SPEEDYINDEX: self._speedy_bal,
+        }[provider]
 
     def _edit_for(self, provider: str) -> QLineEdit:
-        return self._river_edit if provider == PROVIDER_RIVER else self._stock_edit
+        return {
+            PROVIDER_RIVER: self._river_edit,
+            PROVIDER_STOCK: self._stock_edit,
+            PROVIDER_JSONSEO: self._jsonseo_edit,
+            PROVIDER_SPEEDYINDEX: self._speedy_edit,
+        }[provider]
+
+    def _format_balance(self, provider: str, result, empty: bool) -> str:
+        if provider == PROVIDER_SPEEDYINDEX:
+            return format_speedy_balance(result, empty)
+        kind = "key" if provider == PROVIDER_JSONSEO else "url"
+        return format_balance_label(result, empty, kind=kind)
 
     def _load(self):
         self._river_edit.setText(db.get_setting(SETTING_RIVER_URL, ""))
         self._stock_edit.setText(db.get_setting(SETTING_STOCK_URL, ""))
-        self._refresh_balance(PROVIDER_RIVER)
-        self._refresh_balance(PROVIDER_STOCK)
+        self._jsonseo_edit.setText(db.get_setting(SETTING_JSONSEO_KEY, ""))
+        self._speedy_edit.setText(db.get_setting(SETTING_SPEEDYINDEX_KEY, ""))
+        for provider in (
+            PROVIDER_RIVER, PROVIDER_STOCK, PROVIDER_JSONSEO, PROVIDER_SPEEDYINDEX
+        ):
+            self._refresh_balance(provider)
 
     def _refresh_balance(self, provider: str):
         if self._closed:
@@ -120,10 +174,10 @@ class SettingsDialog(QDialog):
         url = self._edit_for(provider).text().strip()
         lbl = self._label_for(provider)
         if not url:
-            lbl.setText(format_balance_label(None, empty_url=True))
+            lbl.setText(self._format_balance(provider, None, True))
             lbl.setStyleSheet("")
             return
-        lbl.setText(format_balance_label(None, empty_url=False))
+        lbl.setText(self._format_balance(provider, None, False))
         lbl.setStyleSheet("")
         old = self._workers.get(provider)
         if old is not None:
@@ -137,7 +191,7 @@ class SettingsDialog(QDialog):
         if self._closed:
             return
         lbl = self._label_for(provider)
-        lbl.setText(format_balance_label(result, empty_url=False))
+        lbl.setText(self._format_balance(provider, result, False))
         if result.ok and result.amount is not None and result.amount > 0:
             lbl.setStyleSheet("color: #00c853;")
         else:
@@ -146,6 +200,8 @@ class SettingsDialog(QDialog):
     def _save(self):
         db.set_setting(SETTING_RIVER_URL, self._river_edit.text().strip())
         db.set_setting(SETTING_STOCK_URL, self._stock_edit.text().strip())
+        db.set_setting(SETTING_JSONSEO_KEY, self._jsonseo_edit.text().strip())
+        db.set_setting(SETTING_SPEEDYINDEX_KEY, self._speedy_edit.text().strip())
         self.accept()
 
     def _wipe(self):
@@ -153,7 +209,7 @@ class SettingsDialog(QDialog):
             self,
             "Очистить базу",
             "Удалить все задания, доноров и бэклинки безвозвратно?\n\n"
-            "URL сервисов и тема не изменятся.",
+            "URL сервисов, API-ключи и тема не изменятся.",
             ok_label="Очистить",
         )
         if not ok:
@@ -174,7 +230,9 @@ class SettingsDialog(QDialog):
 
     def closeEvent(self, event):
         self._closed = True
-        for edit in (self._river_edit, self._stock_edit):
+        for edit in (
+            self._river_edit, self._stock_edit, self._jsonseo_edit, self._speedy_edit
+        ):
             try:
                 edit.editingFinished.disconnect()
             except TypeError:
