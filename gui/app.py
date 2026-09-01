@@ -4,6 +4,7 @@ Main application window — routes between the three screens.
 
 import json
 import logging
+from datetime import datetime, timezone
 
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.google_index import (
+    PROVIDER_JSONSEO,
     PROVIDER_RIVER,
     PROVIDER_STOCK,
     fetch_balance,
@@ -25,6 +27,12 @@ from core.google_index import (
     pick_provider,
 )
 from core.models import CheckConfig
+from core.speedyindex import (
+    eligible_index_submit_items,
+    index_submit_skip_reason,
+    submit_urls,
+    unique_submit_urls,
+)
 from core.task_start import (
     bump_generation,
     can_launch_after_balance,
@@ -37,7 +45,12 @@ from export.excel_export import export_to_excel
 from gui.confirm import ask_confirm
 from gui.constants import APP_VERSION
 from gui.report_view import ReportView
-from gui.settings_dialog import SETTING_RIVER_URL, SETTING_STOCK_URL
+from gui.settings_dialog import (
+    SETTING_JSONSEO_KEY,
+    SETTING_RIVER_URL,
+    SETTING_SPEEDYINDEX_KEY,
+    SETTING_STOCK_URL,
+)
 from gui.task_create_view import TaskCreateView
 from gui.task_list_view import TaskListView
 from gui.theme import DARK_QSS, LIGHT_QSS
@@ -61,6 +74,7 @@ class _BalanceResolveThread(QThread):
     def run(self):
         river_url = db.get_setting(SETTING_RIVER_URL, "")
         stock_url = db.get_setting(SETTING_STOCK_URL, "")
+        jsonseo_key = db.get_setting(SETTING_JSONSEO_KEY, "")
         river_bal = (
             fetch_balance(PROVIDER_RIVER, river_url)
             if river_url and needs_balance_fetch(PROVIDER_RIVER, self._preferred)
@@ -71,8 +85,14 @@ class _BalanceResolveThread(QThread):
             if stock_url and needs_balance_fetch(PROVIDER_STOCK, self._preferred)
             else None
         )
+        jsonseo_bal = (
+            fetch_balance(PROVIDER_JSONSEO, jsonseo_key)
+            if jsonseo_key and needs_balance_fetch(PROVIDER_JSONSEO, self._preferred)
+            else None
+        )
         self.resolved.emit(*pick_provider(
             river_url, river_bal, stock_url, stock_bal, preferred=self._preferred,
+            jsonseo_key=jsonseo_key, jsonseo_balance=jsonseo_bal,
         ))
 
 
@@ -431,7 +451,7 @@ class MainApp(QMainWindow):
             export_to_excel(task_id, path)
             logger.info("Exported task %d to %s", task_id, path)
         except Exception as exc:
-            logger.exception("Export error: %s", exc)
+            logger.exception("Export error")
             QMessageBox.critical(
                 self,
                 "Ошибка экспорта",
@@ -463,6 +483,106 @@ class MainApp(QMainWindow):
                 and self._report_view._task_id == task_id):
             self._report_view.refresh()     # always refresh on completion
         logger.info("Task %d finished, success=%s", task_id, success)
+        if success and not self._closing:
+            self._maybe_auto_submit_index(task_id)
+
+    def _maybe_auto_submit_index(self, task_id: int) -> None:
+        task = db.get_task(task_id)
+        if not task:
+            return
+        try:
+            send = bool(task["send_to_index"])
+        except (KeyError, IndexError):
+            send = False
+        if send:
+            self.send_task_to_index(task_id, auto=True)
+
+    def send_task_to_index(self, task_id: int, auto: bool = False) -> None:
+        """Send eligible donor URLs to SpeedyIndex."""
+        if not auto and self._is_busy(task_id):
+            QMessageBox.information(
+                self,
+                "Задание выполняется",
+                "Дождитесь окончания проверки, затем отправьте на индексацию.",
+            )
+            return
+        key = (db.get_setting(SETTING_SPEEDYINDEX_KEY, "") or "").strip()
+        if not key:
+            if not auto:
+                QMessageBox.warning(
+                    self,
+                    "SpeedyIndex",
+                    "Укажите API-ключ SpeedyIndex в Настройках.",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "SpeedyIndex",
+                    "Автоотправка пропущена: не указан API-ключ SpeedyIndex.",
+                )
+            return
+        task = db.get_task(task_id)
+        donors = db.get_donors_for_index_submit(task_id)
+        items = eligible_index_submit_items(donors)
+        if not items:
+            reason = index_submit_skip_reason(donors)
+            if reason:
+                QMessageBox.warning(self, "SpeedyIndex", reason)
+            elif not auto:
+                QMessageBox.information(
+                    self,
+                    "Отправка на индексацию",
+                    "Нет URL для отправки: нужны HTTP 200, найденный акцептор "
+                    "и отсутствие в индексе Google. Уже отправленные пропускаются.",
+                )
+            return
+        urls, donor_ids = unique_submit_urls(items)
+        if not auto and not ask_confirm(
+            self,
+            "Отправить на индексацию",
+            f"Отправить {len(urls)} URL в SpeedyIndex "
+            "(Google indexer, оплата за проиндексированные)?\n"
+            "Уже отправленные URL не включаются.",
+            ok_label="Отправить",
+        ):
+            return
+        title = task["name"] if task else f"Задание {task_id}"
+        try:
+            result = submit_urls(key, urls, title=title)
+        except Exception as exc:
+            logger.exception("SpeedyIndex submit failed")
+            QMessageBox.warning(
+                self,
+                "SpeedyIndex",
+                f"Не удалось отправить URL:\n{exc}",
+            )
+            return
+        if result.submitted:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            stamped: list[int] = []
+            for url in urls[: result.submitted]:
+                stamped.extend(donor_ids.get(url, []))
+            db.mark_donors_submitted(stamped, now)
+            if (
+                self._stack.currentIndex() == SCREEN_REPORT
+                and self._report_view._task_id == task_id
+            ):
+                self._report_view.refresh()
+        if result.ok:
+            QMessageBox.information(
+                self,
+                "SpeedyIndex",
+                f"Отправлено {result.submitted} URL на индексацию в Google.",
+            )
+        else:
+            extra = (
+                f"\nУже отправлено: {result.submitted}." if result.submitted else ""
+            )
+            QMessageBox.warning(
+                self,
+                "SpeedyIndex",
+                f"{result.error}{extra}",
+            )
 
     # ── Theme ─────────────────────────────────────────────────────────────
 

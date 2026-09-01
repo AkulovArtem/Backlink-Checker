@@ -1,12 +1,18 @@
 import unittest
+from io import BytesIO
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from core.google_index import (
+    PROVIDER_JSONSEO,
     PROVIDER_RIVER,
     PROVIDER_STOCK,
     BalanceResult,
     IndexProvider,
     build_index_request_url,
     canonical_search_endpoint,
+    check_url_indexed,
+    extract_api_key,
     index_url_for_check,
     needs_balance_fetch,
     parse_balance_body,
@@ -94,6 +100,14 @@ RETRYABLE_500_XML = """<?xml version="1.0" encoding="utf-8"?>
 </yandexsearch>
 """
 
+UNAVAILABLE_XML = """<?xml version="1.0" encoding="utf-8"?>
+<yandexsearch version="1.0">
+  <response>
+    <error>Сервис временно недоступен. Пожалуйста, повторите попытку позже.</error>
+  </response>
+</yandexsearch>
+"""
+
 
 class ParseUserKeyTest(unittest.TestCase):
     def test_full_url(self):
@@ -106,6 +120,21 @@ class ParseUserKeyTest(unittest.TestCase):
     def test_missing(self):
         self.assertIsNone(parse_user_key(""))
         self.assertIsNone(parse_user_key("http://xmlriver.com/search/xml"))
+
+
+class ExtractApiKeyTest(unittest.TestCase):
+    def test_raw_key(self):
+        self.assertEqual(extract_api_key("rawKeyValue123"), "rawKeyValue123")
+
+    def test_key_from_url(self):
+        self.assertEqual(
+            extract_api_key("https://jsonseo.ru/api/google/xml?key=abc123&groupby=10"),
+            "abc123",
+        )
+
+    def test_empty(self):
+        self.assertEqual(extract_api_key(""), "")
+        self.assertEqual(extract_api_key("   "), "")
 
 
 class ParseBalanceTest(unittest.TestCase):
@@ -179,6 +208,11 @@ class ParseIndexXmlTest(unittest.TestCase):
         self.assertEqual(r.status, "error")
         self.assertTrue(r.retryable)
 
+    def test_temporarily_unavailable_is_retryable(self):
+        r = parse_index_xml(UNAVAILABLE_XML, "https://example.com/page")
+        self.assertEqual(r.status, "error")
+        self.assertTrue(r.retryable)
+
 
 class PickProviderTest(unittest.TestCase):
     def test_prefers_river_with_balance(self):
@@ -249,6 +283,48 @@ class PickProviderTest(unittest.TestCase):
         self.assertIsNone(p)
         self.assertTrue(any("прочитать сумму" in n for n in notices))
 
+    def test_preferred_jsonseo_with_balance(self):
+        p, notices = pick_provider(
+            "http://xmlriver.com/search/xml?user=1&key=a",
+            BalanceResult(True, 10),
+            "https://xmlstock.com/google/xml/?user=2&key=b",
+            BalanceResult(True, 50),
+            preferred=PROVIDER_JSONSEO,
+            jsonseo_key="abc",
+            jsonseo_balance=BalanceResult(True, 12.5),
+        )
+        self.assertIsNotNone(p)
+        assert p is not None
+        self.assertEqual(p.name, PROVIDER_JSONSEO)
+        self.assertIn("jsonseo.ru", p.endpoint)
+        self.assertIn("key=abc", p.endpoint)
+        self.assertEqual(notices, [])
+
+    def test_preferred_jsonseo_does_not_fall_back_to_river(self):
+        p, notices = pick_provider(
+            "http://xmlriver.com/search/xml?user=1&key=a",
+            BalanceResult(True, 10),
+            "",
+            None,
+            preferred=PROVIDER_JSONSEO,
+            jsonseo_key="",
+            jsonseo_balance=None,
+        )
+        self.assertIsNone(p)
+        self.assertTrue(any("JSON SEO" in n for n in notices))
+
+    def test_empty_preferred_does_not_auto_pick_jsonseo(self):
+        p, notices = pick_provider(
+            "",
+            None,
+            "",
+            None,
+            jsonseo_key="abc",
+            jsonseo_balance=BalanceResult(True, 10),
+        )
+        self.assertIsNone(p)
+        self.assertTrue(any("XMLRiver" in n or "XMLStock" in n for n in notices))
+
 
 class NeedsBalanceFetchTest(unittest.TestCase):
     def test_preferred_stock_skips_river(self):
@@ -263,6 +339,14 @@ class NeedsBalanceFetchTest(unittest.TestCase):
         self.assertTrue(needs_balance_fetch(PROVIDER_RIVER, ""))
         self.assertTrue(needs_balance_fetch(PROVIDER_STOCK, ""))
         self.assertTrue(needs_balance_fetch(PROVIDER_RIVER, None))
+
+    def test_preferred_jsonseo_skips_river_and_stock(self):
+        self.assertFalse(needs_balance_fetch(PROVIDER_RIVER, PROVIDER_JSONSEO))
+        self.assertFalse(needs_balance_fetch(PROVIDER_STOCK, PROVIDER_JSONSEO))
+        self.assertTrue(needs_balance_fetch(PROVIDER_JSONSEO, PROVIDER_JSONSEO))
+
+    def test_preferred_river_skips_jsonseo(self):
+        self.assertFalse(needs_balance_fetch(PROVIDER_JSONSEO, PROVIDER_RIVER))
 
 
 class RequestUrlTest(unittest.TestCase):
@@ -304,6 +388,23 @@ class RequestUrlTest(unittest.TestCase):
             PROVIDER_STOCK, "https://xmlstock.com/?user=1&key=a"
         )
         self.assertIn("/google/xml/", ep)
+
+    def test_jsonseo_site_query(self):
+        p = IndexProvider(
+            PROVIDER_JSONSEO,
+            "https://jsonseo.ru/api/google/xml?key=abc",
+        )
+        url = build_index_request_url(p, "https://ex.com/x?id=1")
+        self.assertIn("site%3A", url)
+        self.assertNotIn("https%3A", url.split("query=")[1])
+        self.assertIn("nfpr=1", url)
+        self.assertIn("groupby=10", url)
+        self.assertIn("key=abc", url)
+        self.assertNotIn("inindex=", url)
+
+    def test_canonical_jsonseo_from_raw_key(self):
+        ep = canonical_search_endpoint(PROVIDER_JSONSEO, "abc123")
+        self.assertEqual(ep, "https://jsonseo.ru/api/google/xml?key=abc123")
 
 
 class IndexUrlForCheckTest(unittest.TestCase):
@@ -366,6 +467,43 @@ class UrlMatchTest(unittest.TestCase):
             site_query_target("https://ex.com/foo/"),
             "ex.com/foo",
         )
+
+
+class CheckUrlIndexedHttpTest(unittest.TestCase):
+    @patch("core.google_index._http_get")
+    def test_http_403_is_not_retried(self, mock_get):
+        mock_get.side_effect = HTTPError(
+            "https://jsonseo.ru/api/google/xml",
+            403,
+            "Forbidden",
+            hdrs={},
+            fp=BytesIO(b""),
+        )
+        provider = IndexProvider(
+            PROVIDER_JSONSEO, "https://jsonseo.ru/api/google/xml?key=a"
+        )
+        result = check_url_indexed("https://ex.com/", provider)
+        self.assertEqual(result.status, "error")
+        self.assertFalse(result.retryable)
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch("core.google_index.time.sleep")
+    @patch("core.google_index._http_get")
+    def test_http_429_is_retried(self, mock_get, _sleep):
+        mock_get.side_effect = HTTPError(
+            "https://jsonseo.ru/api/google/xml",
+            429,
+            "Too Many Requests",
+            hdrs={},
+            fp=BytesIO(b""),
+        )
+        provider = IndexProvider(
+            PROVIDER_JSONSEO, "https://jsonseo.ru/api/google/xml?key=a"
+        )
+        result = check_url_indexed("https://ex.com/", provider)
+        self.assertEqual(result.status, "error")
+        self.assertTrue(result.retryable)
+        self.assertEqual(mock_get.call_count, 3)
 
 
 if __name__ == "__main__":

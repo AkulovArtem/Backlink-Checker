@@ -10,6 +10,14 @@ from PyQt6.QtWidgets import (
 )
 
 
+class ConfirmDialog(QDialog):
+    """QDialog with named buttons so tests can inspect order and labels."""
+
+    _cancel_btn: QPushButton
+    _ok_btn: QPushButton
+    _button_row: QHBoxLayout
+
+
 def make_confirm_dialog(
     parent,
     title: str,
@@ -17,8 +25,8 @@ def make_confirm_dialog(
     *,
     ok_label: str = "Да",
     cancel_label: str = "Отмена",
-) -> QDialog:
-    dlg = QDialog(parent)
+) -> ConfirmDialog:
+    dlg = ConfirmDialog(parent)
     dlg.setWindowTitle(title)
     dlg.setModal(True)
     root = QVBoxLayout(dlg)

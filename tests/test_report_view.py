@@ -226,6 +226,13 @@ class ReportViewLoadTest(unittest.TestCase):
         self.assertEqual(view._donor_table.rowCount(), 1)
         self.assertEqual(view._donor_table.item(0, 2).text(), "Ошибка")
 
+    def test_actions_menu_includes_send_to_index(self):
+        tid = db.create_task("idx", ["example.com"])
+        view = ReportView()
+        view.load_task(tid)
+        labels = [act.text() for act in view._actions_menu().actions() if act.text()]
+        self.assertIn("Отправить на индексацию", labels)
+
 
 class DonorUrlHtmlTest(unittest.TestCase):
     def test_ampersand_in_query_is_escaped(self):

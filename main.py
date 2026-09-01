@@ -14,9 +14,9 @@ from PyQt6.QtWidgets import QApplication
 # so Chromium is found without needing it bundled inside the EXE.
 if getattr(sys, "frozen", False) and "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
     # Chromium is bundled inside the EXE; PyInstaller extracts it to _MEIPASS at runtime.
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = sys._MEIPASS
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = getattr(sys, "_MEIPASS")
 
-from utils.resource_path import data_path, resource_path  # noqa: E402
+from utils.resource_path import data_path, resource_path
 
 # Log file sits next to the EXE (frozen) or project root (dev)
 _LOG_PATH = data_path("backlink_checker.log")
@@ -36,8 +36,8 @@ logging.basicConfig(
     ],
 )
 
-from db import database as db  # noqa: E402
-from gui.app import MainApp  # noqa: E402
+from db import database as db
+from gui.app import MainApp
 
 
 def main():

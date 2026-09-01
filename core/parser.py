@@ -132,7 +132,7 @@ def parse_page(html: str, page_url: str, target_domains: list[str]) -> dict:
 
     # Check page-level nofollow (meta robots)
     page_nofollow = False
-    for meta in soup.find_all("meta", attrs={"name": re.compile(r"^robots$", re.I)}):
+    for meta in soup.find_all("meta", attrs={"name": re.compile(r"^robots$", re.IGNORECASE)}):
         content = str(meta.get("content") or "").lower()
         if "nofollow" in content:
             page_nofollow = True

@@ -3,7 +3,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 from utils.resource_path import data_path
 
@@ -118,8 +118,16 @@ def init_db() -> None:
         _add_column_if_missing(
             conn, "tasks", "index_provider", "TEXT DEFAULT ''"
         )
+        _add_column_if_missing(
+            conn, "tasks", "send_to_index", "INTEGER DEFAULT 0"
+        )
+        _add_column_if_missing(
+            conn, "tasks", "index_submitter", "TEXT DEFAULT ''"
+        )
         _add_column_if_missing(conn, "donors", "google_indexed", "TEXT")
         _add_column_if_missing(conn, "donors", "google_index_error", "TEXT")
+        _add_column_if_missing(conn, "donors", "index_submitted_at", "TEXT")
+        _add_column_if_missing(conn, "donors", "final_url", "TEXT")
     logger.info("Database initialized at %s", DB_PATH)
 
 
@@ -135,17 +143,20 @@ def _add_column_if_missing(
 # ── Tasks ──────────────────────────────────────────────────────────────────
 
 def create_task(name: str, target_domains: list[str], user_agent: str = "desktop_chrome",
-                custom_user_agent: Optional[str] = None, threads: int = 5,
+                custom_user_agent: str | None = None, threads: int = 5,
                 timeout: int = 30, check_google_index: bool = False,
-                index_provider: str = "") -> int:
+                index_provider: str = "", send_to_index: bool = False,
+                index_submitter: str = "") -> int:
     with get_connection() as conn:
         cur = conn.execute(
             """INSERT INTO tasks (name, target_domains, user_agent, custom_user_agent,
-                                  threads, timeout, check_google_index, index_provider)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                  threads, timeout, check_google_index, index_provider,
+                                  send_to_index, index_submitter)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (name, json.dumps(target_domains, ensure_ascii=False),
              user_agent, custom_user_agent, threads, timeout,
-             1 if check_google_index else 0, index_provider or "")
+             1 if check_google_index else 0, index_provider or "",
+             1 if send_to_index else 0, index_submitter or "")
         )
         return cur.lastrowid or 0
 
@@ -166,7 +177,7 @@ def get_all_tasks_with_counts() -> list[sqlite3.Row]:
         """).fetchall()
 
 
-def get_task(task_id: int) -> Optional[sqlite3.Row]:
+def get_task(task_id: int) -> sqlite3.Row | None:
     with get_connection() as conn:
         return conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
 
@@ -208,6 +219,7 @@ def wipe_check_data() -> None:
 _TASK_FIELDS = frozenset({
     "name", "user_agent", "custom_user_agent", "threads", "timeout",
     "check_google_index", "index_provider", "target_domains",
+    "send_to_index", "index_submitter",
 })
 
 
@@ -235,7 +247,8 @@ def reset_task(task_id: int) -> None:
                index_google = NULL, index_yandex = NULL, index_bing = NULL,
                index_baidu = NULL, meta_robots = NULL, x_robots_tag = NULL,
                error_code = NULL, html_snippet = NULL,
-               google_indexed = NULL, google_index_error = NULL
+               google_indexed = NULL, google_index_error = NULL,
+               index_submitted_at = NULL, final_url = NULL
                WHERE task_id = ?""",
             (task_id,)
         )
@@ -321,6 +334,22 @@ def get_donors_for_task(task_id: int) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+_INDEX_SUBMIT_COLUMNS = (
+    "id, url, canonical_url, final_url, http_status, status, "
+    "google_indexed, index_submitted_at"
+)
+
+
+def get_donors_for_index_submit(task_id: int) -> list[sqlite3.Row]:
+    """Donors without html_snippet — used when sending to SpeedyIndex."""
+    with get_connection() as conn:
+        return conn.execute(
+            f"SELECT {_INDEX_SUBMIT_COLUMNS} FROM donors "  # nosec B608
+            "WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        ).fetchall()
+
+
 def get_failed_donors_for_task(task_id: int) -> list[sqlite3.Row]:
     """Return only donors whose last fetch failed (status = 'not_loaded')."""
     with get_connection() as conn:
@@ -349,7 +378,8 @@ def reset_failed_donors(task_id: int) -> None:
                index_google = NULL, index_yandex = NULL, index_bing = NULL,
                index_baidu = NULL, meta_robots = NULL, x_robots_tag = NULL,
                error_code = NULL, html_snippet = NULL,
-               google_indexed = NULL, google_index_error = NULL
+               google_indexed = NULL, google_index_error = NULL,
+               index_submitted_at = NULL, final_url = NULL
                WHERE task_id = ? AND status = 'not_loaded'""",
             (task_id,),
         )
@@ -359,8 +389,20 @@ _DONOR_COLUMNS = frozenset({
     "http_status", "title", "canonical_url", "internal_links", "external_links",
     "index_google", "index_yandex", "index_bing", "index_baidu",
     "meta_robots", "x_robots_tag", "status", "error_code", "html_snippet",
-    "google_indexed", "google_index_error",
+    "google_indexed", "google_index_error", "index_submitted_at",
+    "final_url",
 })
+
+
+def mark_donors_submitted(donor_ids: list[int], submitted_at: str) -> None:
+    """Stamp index_submitted_at for many donors in one transaction."""
+    if not donor_ids:
+        return
+    with get_connection() as conn:
+        conn.executemany(
+            "UPDATE donors SET index_submitted_at = ? WHERE id = ?",
+            [(submitted_at, int(did)) for did in donor_ids],
+        )
 
 
 def update_donor(donor_id: int, **kwargs) -> None:
