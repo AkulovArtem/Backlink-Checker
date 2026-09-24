@@ -4,15 +4,17 @@ Main application window — routes between the three screens.
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -41,7 +43,7 @@ from core.task_start import (
     take_finished_worker,
 )
 from db import database as db
-from export.excel_export import export_to_excel
+from export.excel_export import export_filename, export_to_excel
 from gui.confirm import ask_confirm
 from gui.constants import APP_VERSION
 from gui.report_view import ReportView
@@ -53,7 +55,7 @@ from gui.settings_dialog import (
 )
 from gui.task_create_view import TaskCreateView
 from gui.task_list_view import TaskListView
-from gui.theme import DARK_QSS, LIGHT_QSS
+from gui.theme import DARK_QSS, LIGHT_QSS, make_palette
 from gui.worker import CheckWorker
 from utils.resource_path import resource_path
 
@@ -62,6 +64,11 @@ logger = logging.getLogger(__name__)
 SCREEN_LIST   = 0
 SCREEN_CREATE = 1
 SCREEN_REPORT = 2
+
+# The report rebuilds every widget; on large tasks that takes seconds, so the
+# throttle backs off to keep the UI blocked at most ~1/_REFRESH_COST_FACTOR of the time.
+_REFRESH_MIN_INTERVAL_MS = 1000
+_REFRESH_COST_FACTOR = 4
 
 
 class _BalanceResolveThread(QThread):
@@ -96,6 +103,25 @@ class _BalanceResolveThread(QThread):
         ))
 
 
+class _ExportThread(QThread):
+    """Writes the .xlsx off the GUI thread: 100k donors take ~10 s."""
+
+    failed = pyqtSignal(str)
+
+    def __init__(self, task_id: int, path: str, parent=None):
+        super().__init__(parent)
+        self._task_id = task_id
+        self._path = path
+
+    def run(self):
+        try:
+            export_to_excel(self._task_id, self._path)
+            logger.info("Exported task %d to %s", self._task_id, self._path)
+        except Exception as exc:
+            logger.exception("Export error")
+            self.failed.emit(str(exc) or type(exc).__name__)
+
+
 class MainApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -111,13 +137,14 @@ class MainApp(QMainWindow):
         self._starting: set[int] = set()
         self._stopping: set[int] = set()
         self._start_gen: dict[int, int] = {}
-        self._balance_threads: list[QThread] = []
+        self._balance_threads: list[_BalanceResolveThread] = []
+        self._export_threads: list[_ExportThread] = []
         self._closing = False
 
-        # Throttle report refresh to at most once per second during active checks
+        # Throttle report refresh during active checks (see _report_view_refresh_now)
         self._report_refresh_timer = QTimer(self)
         self._report_refresh_timer.setSingleShot(True)
-        self._report_refresh_timer.setInterval(1000)
+        self._report_refresh_timer.setInterval(_REFRESH_MIN_INTERVAL_MS)
         self._report_refresh_timer.timeout.connect(self._report_view_refresh_now)
 
         # Stacked widget
@@ -308,7 +335,7 @@ class MainApp(QMainWindow):
         worker.terminate()
         worker.wait(1000)
 
-    def _reap_balance_thread(self, thread: QThread) -> None:
+    def _reap_balance_thread(self, thread: _BalanceResolveThread) -> None:
         try:
             self._balance_threads.remove(thread)
         except ValueError:
@@ -354,14 +381,15 @@ class MainApp(QMainWindow):
         self._list_view.refresh()
 
     def retry_failed_task(self, task_id: int):
-        """Re-run only donors that previously failed to load (status = not_loaded)."""
+        """Re-run donors that failed to load or whose Google index check failed."""
         failed = db.get_failed_donors_for_task(task_id)
         if not failed:
             QMessageBox.information(
                 self,
                 "Нет неудачных доноров",
-                "Нет доноров со статусом «Не загружено». "
-                "«Продолжить проверку» возьмёт оставшихся в очереди.",
+                "Нет доноров со статусом «Не загружено» или с ошибкой "
+                "проверки индекса Google. «Продолжить проверку» возьмёт "
+                "оставшихся в очереди.",
             )
             return
 
@@ -442,21 +470,47 @@ class MainApp(QMainWindow):
         logger.info("All tasks wiped")
 
     def export_task(self, task_id: int):
+        task = db.get_task(task_id)
         path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить Excel", f"task_{task_id}.xlsx", "Excel (*.xlsx)"
+            self,
+            "Сохранить Excel",
+            export_filename(task["name"] if task else "", task_id),
+            "Excel (*.xlsx)",
         )
         if not path:
             return
-        try:
-            export_to_excel(task_id, path)
-            logger.info("Exported task %d to %s", task_id, path)
-        except Exception as exc:
-            logger.exception("Export error")
-            QMessageBox.critical(
-                self,
-                "Ошибка экспорта",
-                f"Не удалось сохранить файл:\n{exc}\n\nПодробности — в лог-файле.",
-            )
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"  # a file without the extension will not open on double-click
+        # Modal busy dialog: the window stays responsive (no "not responding")
+        # while the task cannot be changed or deleted mid-export.
+        progress = QProgressDialog("Сохранение Excel…", "", 0, 0, self)
+        progress.setWindowTitle("Экспорт")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        thread = _ExportThread(task_id, path, self)
+        thread.failed.connect(self._on_export_failed)
+        thread.finished.connect(lambda t=thread, d=progress: self._on_export_done(t, d))
+        self._export_threads.append(thread)
+        thread.start()
+
+    def _on_export_done(self, thread: _ExportThread, progress: QProgressDialog) -> None:
+        progress.close()
+        progress.deleteLater()
+        if thread in self._export_threads:
+            self._export_threads.remove(thread)
+        thread.deleteLater()
+
+    def _on_export_failed(self, message: str) -> None:
+        if self._closing:
+            return
+        QMessageBox.critical(
+            self,
+            "Ошибка экспорта",
+            f"Не удалось сохранить файл:\n{message}\n\nПодробности — в лог-файле.",
+        )
 
     # ── Worker callbacks ──────────────────────────────────────────────────
 
@@ -470,7 +524,12 @@ class MainApp(QMainWindow):
     def _report_view_refresh_now(self):
         """Called by the throttle timer — rebuilds the report if still visible."""
         if self._stack.currentIndex() == SCREEN_REPORT:
+            started = time.monotonic()
             self._report_view.refresh()
+            cost_ms = (time.monotonic() - started) * 1000
+            self._report_refresh_timer.setInterval(
+                max(_REFRESH_MIN_INTERVAL_MS, int(cost_ms * _REFRESH_COST_FACTOR))
+            )
 
     def _on_finished(self, task_id: int, success: bool, worker=None):
         if worker is None:
@@ -592,7 +651,12 @@ class MainApp(QMainWindow):
         self._apply_theme()
 
     def _apply_theme(self):
-        QApplication.instance().setStyleSheet(DARK_QSS if self._dark_mode else LIGHT_QSS)
+        app = QApplication.instance()
+        if not isinstance(app, QApplication):
+            return
+        # Palette first: custom-painted bars and rich-text links read it; QSS does not.
+        app.setPalette(make_palette(self._dark_mode))
+        app.setStyleSheet(DARK_QSS if self._dark_mode else LIGHT_QSS)
 
     # ── Graceful shutdown ─────────────────────────────────────────────────
 
@@ -619,6 +683,10 @@ class MainApp(QMainWindow):
             else:
                 w.terminate()
                 w.wait(1000)
+        # An export in progress is left to finish, or the .xlsx would be truncated.
+        for thread in list(self._export_threads):
+            while not thread.wait(50):
+                QApplication.processEvents()
         for thread in list(self._balance_threads):
             step, elapsed = 50, 0
             while elapsed < 8000:

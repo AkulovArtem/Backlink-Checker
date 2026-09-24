@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -49,6 +51,60 @@ class AppLifecycleTest(unittest.TestCase):
         self.window._workers[tid] = new
         self.window._on_finished(tid, False, old)
         self.assertIs(self.window._workers.get(tid), new)
+
+    def _export_and_wait(self, fake_export) -> None:
+        tid = db.create_task("t", ["example.com"])
+        with patch("gui.app.QFileDialog.getSaveFileName", return_value=("/tmp/x.xlsx", "")), \
+                patch("gui.app.export_to_excel", side_effect=fake_export):
+            self.window.export_task(tid)
+            for _ in range(200):
+                if not self.window._export_threads:
+                    break
+                self._app.processEvents()
+                time.sleep(0.01)
+        self.assertEqual(self.window._export_threads, [])
+
+    @patch("gui.app.QMessageBox.critical")
+    def test_export_runs_off_the_gui_thread(self, critical):
+        threads = []
+        self._export_and_wait(lambda *_: threads.append(threading.get_ident()))
+        self.assertEqual(len(threads), 1)
+        self.assertNotEqual(threads[0], threading.get_ident())
+        critical.assert_not_called()
+
+    @patch("gui.app.QMessageBox.critical")
+    def test_export_error_is_reported(self, critical):
+        def boom(*_):
+            raise PermissionError("файл открыт в Excel")
+        self._export_and_wait(boom)
+        critical.assert_called_once()
+        self.assertIn("файл открыт в Excel", critical.call_args.args[2])
+
+    @patch("gui.app.export_to_excel")
+    def test_export_dialog_suggests_task_name_and_keeps_xlsx(self, export):
+        tid = db.create_task("Крауд: сентябрь", ["example.com"])
+        with patch("gui.app.QFileDialog.getSaveFileName", return_value=("/tmp/report", "")) as dlg:
+            self.window.export_task(tid)
+            while self.window._export_threads:
+                self._app.processEvents()
+        self.assertTrue(dlg.call_args.args[2].endswith("Крауд_ сентябрь.xlsx"))
+        export.assert_called_once_with(tid, "/tmp/report.xlsx")
+
+    def _refresh_taking(self, seconds: float) -> None:
+        clock = iter([100.0, 100.0 + seconds])
+        self.window._stack.setCurrentIndex(2)  # SCREEN_REPORT
+        with patch.object(self.window._report_view, "refresh"), \
+                patch("gui.app.time.monotonic", side_effect=lambda: next(clock)):
+            self.window._report_view_refresh_now()
+
+    def test_slow_report_refresh_backs_off_throttle(self):
+        self._refresh_taking(2.0)
+        # A 2 s rebuild must not be repeated every second during a check.
+        self.assertGreaterEqual(self.window._report_refresh_timer.interval(), 8000)
+
+    def test_fast_report_refresh_keeps_one_second_throttle(self):
+        self._refresh_taking(0.05)
+        self.assertEqual(self.window._report_refresh_timer.interval(), 1000)
 
     @patch("gui.app.QMessageBox.information")
     def test_retry_failed_without_failures_does_not_stop_running(self, _info):

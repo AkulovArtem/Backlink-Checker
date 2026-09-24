@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,7 +42,12 @@ from gui.settings_dialog import (
     SETTING_STOCK_URL,
     _BalanceWorker,
 )
-from utils.url_utils import MAX_DONORS, MAX_TARGETS, parse_donor_lines
+from utils.url_utils import (
+    MAX_DONORS,
+    MAX_TARGETS,
+    decode_donor_file,
+    parse_donor_lines,
+)
 from utils.user_agents import PROFILES
 
 logger = logging.getLogger(__name__)
@@ -157,11 +161,17 @@ class TaskCreateView(QWidget):
         hint2.setObjectName("secondary")
         root.addWidget(hint2)
 
-        # Settings (collapsible via GroupBox)
-        settings_box = QGroupBox("Настройки")
-        settings_box.setCheckable(True)
-        settings_box.setChecked(False)
-        settings_layout = QVBoxLayout(settings_box)
+        # Advanced settings: collapsed by default. A checkable QGroupBox only
+        # disabled its children and its checkbox was invisible in the dark theme.
+        self._settings_toggle = QPushButton()
+        self._settings_toggle.setObjectName("btnLink")
+        self._settings_toggle.setCheckable(True)
+        self._settings_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._settings_toggle.toggled.connect(self._on_settings_toggled)
+        root.addWidget(self._settings_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        self._settings_body = QWidget()
+        settings_layout = QVBoxLayout(self._settings_body)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
         settings_layout.setSpacing(10)
 
         # User-Agent
@@ -200,7 +210,8 @@ class TaskCreateView(QWidget):
         timeout_row.addStretch()
         settings_layout.addLayout(timeout_row)
 
-        root.addWidget(settings_box)
+        root.addWidget(self._settings_body)
+        self._on_settings_toggled(False)
 
         self._index_check = QCheckBox("Проверка индексации ссылок в Google")
         self._index_check.setToolTip(
@@ -271,30 +282,44 @@ class TaskCreateView(QWidget):
         submit_col.addLayout(speedy_row)
         self._submit_index_box.setVisible(False)
         root.addWidget(self._submit_index_box)
-        self._balance_workers: dict[str, _BalanceWorker] = {}
+
+        root.addStretch()
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
+
+        # Footer pinned under the scroll area: the submit button and its
+        # messages stay on screen however long the form is.
+        footer = QFrame()
+        footer.setObjectName("footerBar")
+        footer_col = QVBoxLayout(footer)
+        footer_col.setContentsMargins(24, 12, 24, 12)
+        footer_col.setSpacing(6)
 
         # Validation error label
         self._error_lbl = QLabel("")
         self._error_lbl.setStyleSheet("color: #ff5252;")
+        self._error_lbl.setWordWrap(True)
         self._error_lbl.setVisible(False)
-        root.addWidget(self._error_lbl)
+        footer_col.addWidget(self._error_lbl)
 
         # Skipped-URL warning label (shown when some URLs lack http/https)
         self._warn_lbl = QLabel("")
         self._warn_lbl.setStyleSheet("color: #ffa726;")
         self._warn_lbl.setWordWrap(True)
         self._warn_lbl.setVisible(False)
-        root.addWidget(self._warn_lbl)
+        footer_col.addWidget(self._warn_lbl)
 
         # Create / append button
+        button_row = QHBoxLayout()
+        button_row.addStretch()
         self._submit_btn = QPushButton("Создать")
         self._submit_btn.setObjectName("btnCreate")
+        self._submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._submit_btn.setMinimumWidth(220)
         self._submit_btn.clicked.connect(self._submit)
-        root.addWidget(self._submit_btn)
-
-        root.addStretch()
-        scroll.setWidget(container)
-        outer.addWidget(scroll)
+        button_row.addWidget(self._submit_btn)
+        footer_col.addLayout(button_row)
+        outer.addWidget(footer)
 
     @staticmethod
     def _section(num: int, title: str) -> QHBoxLayout:
@@ -314,6 +339,20 @@ class TaskCreateView(QWidget):
             self._skip_confirmed = False
             self._warn_lbl.setVisible(False)
 
+    def _on_settings_toggled(self, expanded: bool) -> None:
+        self._settings_body.setVisible(expanded)
+        arrow = "▾" if expanded else "▸"
+        self._settings_toggle.setText(f"{arrow} Дополнительные настройки")
+
+    def _expand_settings_if_customised(self) -> None:
+        """Cloned / appended tasks: show the block when it holds non-defaults."""
+        customised = (
+            self._ua_combo.currentIndex() != 0
+            or self._threads_spin.value() != 5
+            or self._timeout_spin.value() != 30
+        )
+        self._settings_toggle.setChecked(customised)
+
     def _on_ua_changed(self):
         is_custom = self._ua_combo.currentData() == "custom"
         self._custom_ua_edit.setVisible(is_custom)
@@ -323,7 +362,7 @@ class TaskCreateView(QWidget):
         if not path:
             return
         try:
-            text = Path(path).read_text(encoding="utf-8", errors="ignore")
+            text = decode_donor_file(Path(path).read_bytes())
             existing = self._donors_edit.toPlainText().strip()
             combined = (existing + "\n" + text).strip() if existing else text
             self._donors_edit.setPlainText(combined)
@@ -491,6 +530,7 @@ class TaskCreateView(QWidget):
         self._ua_combo.setCurrentIndex(0)
         self._threads_spin.setValue(5)
         self._timeout_spin.setValue(30)
+        self._settings_toggle.setChecked(False)
         self._index_check.setChecked(False)
         self._send_index_check.setChecked(False)
         self._river_radio.setChecked(True)
@@ -550,6 +590,7 @@ class TaskCreateView(QWidget):
         self._apply_send_to_index(task)
         self._on_index_check_toggled(self._index_check.isChecked())
         self._on_send_index_toggled(self._send_index_check.isChecked())
+        self._expand_settings_if_customised()
 
     def prefill(self, task, donors: list) -> None:
         """Pre-fill the form with data from an existing task for cloning."""
@@ -574,6 +615,7 @@ class TaskCreateView(QWidget):
         self._apply_send_to_index(task)
         self._on_index_check_toggled(self._index_check.isChecked())
         self._on_send_index_toggled(self._send_index_check.isChecked())
+        self._expand_settings_if_customised()
 
     def _selected_index_provider(self) -> str:
         if self._jsonseo_radio.isChecked():
