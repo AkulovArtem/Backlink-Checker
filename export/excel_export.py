@@ -9,11 +9,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import openpyxl
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Border, Font, NamedStyle, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from db import database as db
-from utils.url_utils import get_domain, matches_target, normalize_domain
+from utils.url_utils import get_domain, matches_target, normalize_domain, same_page
 
 logger = logging.getLogger(__name__)
 
@@ -41,61 +41,81 @@ CLR_WHITE     = "FFFFFFFF"
 CLR_BORDER    = "FFCCCCCC"
 
 
-def _header_font():
-    return Font(bold=True, color=CLR_HEADER_FG)
+# Named styles, registered once per workbook. Assigning a fresh Font/Border/
+# Fill per cell made openpyxl hash and dedupe style objects for every cell —
+# ~5 minutes for a 100k-donor task. A named style is a single lookup.
+STYLE_HEADER = "bc_header"
+STYLE_BODY = "bc_body"
+STYLE_ZEBRA = "bc_zebra"
+_STYLE_BY_FILL = {CLR_GREEN: "bc_green", CLR_ORANGE: "bc_orange", CLR_RED: "bc_red"}
+
+_WIDTH_SAMPLE_ROWS = 2000
 
 
-def _header_fill():
-    return PatternFill(patternType="solid", fgColor=CLR_HEADER, bgColor=CLR_WHITE)
+def _solid(color: str) -> PatternFill:
+    return PatternFill(patternType="solid", fgColor=color, bgColor=CLR_WHITE)
 
 
-def _border():
+def _register_styles(wb) -> None:
     thin = Side(style="thin", color=CLR_BORDER)
-    return Border(left=thin, right=thin, top=thin, bottom=thin)
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    body_align = Alignment(vertical="top", wrap_text=True)
+    wb.add_named_style(NamedStyle(
+        name=STYLE_HEADER,
+        font=Font(bold=True, color=CLR_HEADER_FG),
+        fill=_solid(CLR_HEADER),
+        alignment=Alignment(horizontal="center", vertical="center", wrap_text=True),
+        border=border,
+    ))
+    wb.add_named_style(NamedStyle(name=STYLE_BODY, alignment=body_align, border=border))
+    wb.add_named_style(NamedStyle(
+        name=STYLE_ZEBRA, alignment=body_align, border=border, fill=_solid(CLR_ZEBRA)
+    ))
+    for color, name in _STYLE_BY_FILL.items():
+        wb.add_named_style(NamedStyle(
+            name=name, alignment=body_align, border=border, fill=_solid(color)
+        ))
 
 
 def _write_headers(ws, headers: list[str]):
     for col, text in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=text)
-        cell.font = _header_font()
-        cell.fill = _header_fill()
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = _border()
+        ws.cell(row=1, column=col, value=text).style = STYLE_HEADER
     ws.row_dimensions[1].height = 32
 
 
 def _auto_width(ws, min_w=10, max_w=60):
-    for col in ws.columns:
-        max_len = 0
-        col_letter = get_column_letter(col[0].column)
-        for cell in col:
-            try:
-                if cell.value:
-                    max_len = max(max_len, len(str(cell.value)))
-            except Exception:  # nosec B110
-                pass
-        ws.column_dimensions[col_letter].width = min(max(max_len + 2, min_w), max_w)
+    """Fit columns to content, judged by the first rows (like Qt's resize-to-contents)."""
+    widths: dict[int, int] = {}
+    for row in ws.iter_rows(max_row=min(ws.max_row, _WIDTH_SAMPLE_ROWS)):
+        for cell in row:
+            if cell.value is not None and cell.value != "":
+                widths[cell.column] = max(widths.get(cell.column, 0), len(str(cell.value)))
+    for col in range(1, ws.max_column + 1):
+        width = widths.get(col, 0) + 2
+        ws.column_dimensions[get_column_letter(col)].width = min(max(width, min_w), max_w)
 
 
-def _zebra_fill(row: int) -> PatternFill | None:
-    return PatternFill(patternType="solid", fgColor=CLR_ZEBRA, bgColor=CLR_WHITE) if row % 2 == 0 else None
+def _finish_table(ws) -> None:
+    """Column widths, a header that stays visible while scrolling, and filters."""
+    _auto_width(ws)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
 
 
-def _http_fill(status_code) -> PatternFill | None:
+def _http_fill(status_code) -> str | None:
+    """Fill colour for an HTTP status cell, or None."""
     if not status_code:
         return None
-    grp = status_code // 100
-    if grp == 2:
-        return PatternFill(patternType="solid", fgColor=CLR_GREEN, bgColor=CLR_WHITE)
-    if grp == 4:
-        return PatternFill(patternType="solid", fgColor=CLR_ORANGE, bgColor=CLR_WHITE)
-    if grp == 5:
-        return PatternFill(patternType="solid", fgColor=CLR_RED, bgColor=CLR_WHITE)
-    return None
+    return {2: CLR_GREEN, 4: CLR_ORANGE, 5: CLR_RED}.get(status_code // 100)
+
+
+def _paint(cell, color: str | None) -> None:
+    if color is not None:
+        cell.style = _STYLE_BY_FILL[color]
 
 
 def _write_row(ws, row_idx: int, values: list, zebra: bool = True):
-    fill = _zebra_fill(row_idx) if zebra else None
+    style = STYLE_ZEBRA if zebra and row_idx % 2 == 0 else STYLE_BODY
     for col, val in enumerate(values, 1):
         sanitized = _sanitize(val)
         cell = ws.cell(row=row_idx, column=col)
@@ -104,16 +124,34 @@ def _write_row(ws, row_idx: int, values: list, zebra: bool = True):
             # openpyxl auto-sets data_type='f' for strings starting with '=';
             # override to 's' so scraped content is never treated as a formula.
             cell.data_type = "s"
-        cell.alignment = Alignment(vertical="top", wrap_text=True)
-        cell.border = _border()
-        if fill:
-            cell.fill = fill
+        cell.style = style
 
 
 # ── Sheet builders ─────────────────────────────────────────────────────────
 
 _ROBOTS_RU = {"open": "Открыто", "closed": "Закрыто"}
 _GINDEX_RU = {"indexed": "Да", "not_indexed": "Нет", "error": "Ошибка"}
+
+
+_DONOR_STATUS_RU = {
+    "found": "Найдено",
+    "not_found": "Не найдено",
+    "not_loaded": "Не загружено",
+    "pending": "В очереди",
+}
+# Same colours as the in-app report: found green, not found orange, error red.
+_STATUS_FILL = {"found": CLR_GREEN, "not_found": CLR_ORANGE, "not_loaded": CLR_RED}
+_VALUE_FILL_COLUMNS = (
+    "Robots Google", "Robots Yandex", "Robots Bing", "Robots Baidu",
+    "В индексе Google", "Ошибка индекса Google",
+)
+
+
+def _row_value(row, key: str):
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
 
 
 def _donor_gindex(donor) -> str:
@@ -186,13 +224,14 @@ def _gindex_label(value) -> str:
     return _GINDEX_RU.get(value, "—")
 
 
-def _value_fill(value) -> PatternFill | None:
+def _value_fill(value) -> str | None:
+    """Fill colour for a Robots / В индексе Google cell, or None."""
     if value in ("Открыто", "Да"):
-        return PatternFill(patternType="solid", fgColor=CLR_GREEN, bgColor=CLR_WHITE)
+        return CLR_GREEN
     if value in ("Закрыто", "Нет"):
-        return PatternFill(patternType="solid", fgColor=CLR_RED, bgColor=CLR_WHITE)
+        return CLR_RED
     if value == "Ошибка":
-        return PatternFill(patternType="solid", fgColor=CLR_ORANGE, bgColor=CLR_WHITE)
+        return CLR_ORANGE
     return None
 
 
@@ -260,7 +299,8 @@ def _sheet_summary(wb, task, target_domains, donors, backlinks):
 def _sheet_donors(wb, donors, backlinks):
     ws = wb.create_sheet("Доноры")
     headers = [
-        "URL донора", "HTTP статус", "Title", "Canonical", "HTML сниппет",
+        "URL донора", "Статус", "HTTP статус", "Итоговый URL",
+        "Title", "Canonical", "HTML сниппет",
         "Внутр. ссылок", "Внешн. ссылок",
         "Robots Google", "Robots Yandex", "Robots Bing", "Robots Baidu",
         "В индексе Google", "Ошибка индекса Google",
@@ -268,6 +308,7 @@ def _sheet_donors(wb, donors, backlinks):
         "Найдено бэклинков"
     ]
     _write_headers(ws, headers)
+    col = {name: i for i, name in enumerate(headers, 1)}
 
     bl_counts: dict[int, int] = {}
     for bl in backlinks:
@@ -275,9 +316,13 @@ def _sheet_donors(wb, donors, backlinks):
 
     for row_idx, donor in enumerate(donors, 2):
         http = donor["http_status"]
+        final_url = _row_value(donor, "final_url") or ""
         values = [
             donor["url"],
+            _DONOR_STATUS_RU.get(donor["status"], donor["status"] or "—"),
             http or donor["error_code"] or "—",
+            # Only a real redirect is worth a value — not Chromium's "/" or %-encoding.
+            final_url if final_url and not same_page(final_url, donor["url"]) else "",
             donor["title"] or "",
             donor["canonical_url"] or "",
             _donor_html_snippet(donor),
@@ -294,18 +339,13 @@ def _sheet_donors(wb, donors, backlinks):
             bl_counts.get(donor["id"], 0),
         ]
         _write_row(ws, row_idx, values)
-        # Apply HTTP colour to status cell
-        status_cell = ws.cell(row=row_idx, column=2)
-        http_fill = _http_fill(http)
-        if http_fill:
-            status_cell.fill = http_fill
-        for col in (8, 9, 10, 11, 12, 13):
-            cell = ws.cell(row=row_idx, column=col)
-            fill = _value_fill(cell.value)
-            if fill:
-                cell.fill = fill
+        _paint(ws.cell(row=row_idx, column=col["Статус"]), _STATUS_FILL.get(donor["status"]))
+        _paint(ws.cell(row=row_idx, column=col["HTTP статус"]), _http_fill(http))
+        for name in _VALUE_FILL_COLUMNS:
+            cell = ws.cell(row=row_idx, column=col[name])
+            _paint(cell, _value_fill(cell.value))
 
-    _auto_width(ws)
+    _finish_table(ws)
 
 
 def _sheet_backlinks(wb, backlinks, donor_map: dict):
@@ -327,7 +367,7 @@ def _sheet_backlinks(wb, backlinks, donor_map: dict):
             (bl["context_html"] or "")[:500],
         ])
 
-    _auto_width(ws)
+    _finish_table(ws)
 
 
 def _sheet_domains(wb, backlinks, target_domains):
@@ -350,32 +390,50 @@ def _sheet_domains(wb, backlinks, target_domains):
 
         _write_row(ws, row_idx, [orig, donors, len(matched), df, nf,
                                   "Найден" if found else "Не найден"])
-        ws.cell(row=row_idx, column=6).fill = PatternFill(
-            patternType="solid",
-            fgColor=CLR_GREEN if found else CLR_RED,
-            bgColor=CLR_WHITE,
-        )
+        _paint(ws.cell(row=row_idx, column=6), CLR_GREEN if found else CLR_RED)
 
-    _auto_width(ws)
+    _finish_table(ws)
 
 
 def _sheet_anchors(wb, anchor_stats):
     ws = wb.create_sheet("Топ анкоры")
-    _write_headers(ws, ["Анкор", "Ссылки", "Домены", "Dofollow / Nofollow", "% от общего"])
+    _write_headers(ws, ["Анкор", "Ссылки", "Домены", "Dofollow", "Nofollow", "% от общего"])
 
+    # Numbers stay numbers so Excel can sort, filter and sum them.
     for row_idx, row in enumerate(anchor_stats, 2):
         _write_row(ws, row_idx, [
             row["anchor_text"] or "(пусто)",
             row["cnt"],
             row["domains"],
-            f"{row['dofollow']} / {row['nofollow']}",
-            f"{row['pct']:.1f}%",
+            row["dofollow"],
+            row["nofollow"],
+            row["pct"] / 100,
         ])
+        ws.cell(row=row_idx, column=6).number_format = "0.0%"
 
-    _auto_width(ws)
+    _finish_table(ws)
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
+
+_FILENAME_FORBIDDEN_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+_FILENAME_MAX = 100
+# Device names Windows refuses as file names, even with an extension.
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def export_filename(task_name: str, task_id: int) -> str:
+    """Default .xlsx name: the task name made safe for Windows and macOS."""
+    name = _FILENAME_FORBIDDEN_RE.sub("_", task_name or "")
+    name = " ".join(name.split())[:_FILENAME_MAX].strip(" .")
+    if name.upper() in _WINDOWS_RESERVED:
+        name += "_"
+    return f"{name or f'task_{task_id}'}.xlsx"
+
 
 def export_to_excel(task_id: int, output_path: str) -> None:
     task = db.get_task(task_id)
@@ -416,6 +474,7 @@ def export_to_excel(task_id: int, output_path: str) -> None:
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # remove default sheet
+    _register_styles(wb)
 
     _sheet_summary(wb, task, target_domains, donors, backlinks)
     _sheet_domains(wb, backlinks, target_domains)
