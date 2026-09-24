@@ -22,6 +22,9 @@ env/
 
 # App data
 backlink_checker.db
+# SQLite WAL side files (the app enables journal_mode=WAL)
+backlink_checker.db-shm
+backlink_checker.db-wal
 backlink_checker.log
 backlink_checker.log.*
 *.xlsx
