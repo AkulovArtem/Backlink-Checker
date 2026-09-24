@@ -5,11 +5,11 @@ Parse rendered HTML: extract title, canonical, all links, backlinks to target do
 import html as _html_module
 import logging
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, CData, NavigableString
 
-from core.models import BacklinkInfo
+from core.models import BacklinkInfo, clip_anchor_text
 from utils.url_utils import get_domain, normalize_domain
 
 logger = logging.getLogger(__name__)
@@ -20,23 +20,43 @@ def _matches_target(href: str, targets: set[str]) -> bool:
     return any(link_domain == t or link_domain.endswith("." + t) for t in targets)
 
 
+# Tags that start a new line when rendered — their text must not glue to the neighbours.
+_BREAK_TAGS = frozenset({
+    "br", "p", "div", "li", "ul", "ol", "dl", "dt", "dd", "tr", "td", "th", "table",
+    "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "header", "footer",
+    "blockquote", "figure", "figcaption", "address", "pre",
+})
+
+
+def _visible_text(tag) -> str:
+    """Text as a reader sees it: strings joined as-is, <br>/blocks as spaces,
+    whitespace collapsed. get_text(strip=True) stripped every fragment, so
+    "купить <b>слона</b>" became "купитьслона"."""
+    parts: list[str] = []
+    for node in tag.descendants:
+        # Exact types: Comment, Script, Stylesheet etc. subclass NavigableString.
+        if type(node) in (NavigableString, CData):
+            parts.append(str(node))
+        elif getattr(node, "name", None) in _BREAK_TAGS:
+            parts.append(" ")
+    return " ".join("".join(parts).split())
+
+
 def _extract_anchor(tag) -> tuple[str, str]:
     """
     Returns (anchor_text, anchor_type).
     Priority: inner text → img alt → title attr.
     Type: "text" if there is visible text, "image" if only img.
     """
-    inner_text = tag.get_text(strip=True)
+    inner_text = _visible_text(tag)
     if inner_text:
         return inner_text, "text"
 
     img = tag.find("img")
     if img:
-        alt = img.get("alt", "").strip()
-        return alt or "", "image"
+        return " ".join(str(img.get("alt") or "").split()), "image"
 
-    title = tag.get("title", "").strip()
-    return title, "text"
+    return " ".join(str(tag.get("title") or "").split()), "text"
 
 
 def _rel_tokens(tag) -> set[str]:
@@ -118,7 +138,7 @@ def parse_page(html: str, page_url: str, target_domains: list[str]) -> dict:
 
     # Title
     title_tag = soup.find("title")
-    title = title_tag.get_text(strip=True) if title_tag else ""
+    title = _visible_text(title_tag) if title_tag else ""
 
     # Canonical (rel is case-insensitive in HTML)
     canonical_url = None
@@ -133,8 +153,11 @@ def parse_page(html: str, page_url: str, target_domains: list[str]) -> dict:
     # Check page-level nofollow (meta robots)
     page_nofollow = False
     for meta in soup.find_all("meta", attrs={"name": re.compile(r"^robots$", re.IGNORECASE)}):
-        content = str(meta.get("content") or "").lower()
-        if "nofollow" in content:
+        directives = {
+            d.strip() for d in str(meta.get("content") or "").lower().split(",")
+        }
+        # "none" is shorthand for "noindex, nofollow"
+        if directives & {"nofollow", "none"}:
             page_nofollow = True
             break
 
@@ -146,11 +169,17 @@ def parse_page(html: str, page_url: str, target_domains: list[str]) -> dict:
 
     for tag in soup.find_all("a", href=True):
         href = str(tag["href"]).strip()
-        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+        if not href or href.startswith("#"):
             continue
 
-        # Resolve relative URLs
-        absolute_href = urljoin(page_url, href)
+        # Resolve relative URLs; skip mailto:, tel:, javascript: etc. (any case)
+        try:
+            absolute_href = urljoin(page_url, href)
+            scheme = urlparse(absolute_href).scheme.lower()
+        except ValueError:  # e.g. "http://[bad" — one broken link must not fail the page
+            continue
+        if scheme not in ("http", "https"):
+            continue
         link_host = get_domain(absolute_href)
 
         if link_host == page_host:
@@ -160,6 +189,7 @@ def parse_page(html: str, page_url: str, target_domains: list[str]) -> dict:
 
         if _matches_target(absolute_href, targets):
             anchor_text, anchor_type = _extract_anchor(tag)
+            anchor_text = clip_anchor_text(anchor_text)
             rel_type = _get_rel_type(tag, page_nofollow)
             context, context_pos = _extract_context(tag, html, search_from=context_pos)
 

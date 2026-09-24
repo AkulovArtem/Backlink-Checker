@@ -198,6 +198,16 @@ def update_task_status(task_id: int, status: str, progress: int = 0) -> None:
         )
 
 
+def reset_interrupted_tasks() -> int:
+    """At startup no worker exists, so 'running' is left over from a crash,
+    a forced thread stop or a hard quit. Put such tasks back in the queue."""
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'pending', progress = 0 WHERE status = 'running'"
+        )
+        return cur.rowcount
+
+
 def delete_task(task_id: int) -> None:
     """Permanently delete a task and all its donors/backlinks (CASCADE)."""
     with get_connection() as conn:
@@ -350,11 +360,16 @@ def get_donors_for_index_submit(task_id: int) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+# Page did not load, or it loaded but the Google index check failed (e.g. the
+# provider was down) — both are worth another try without re-running the rest.
+_FAILED_DONOR_SQL = "task_id = ? AND (status = 'not_loaded' OR google_indexed = 'error')"
+
+
 def get_failed_donors_for_task(task_id: int) -> list[sqlite3.Row]:
-    """Return only donors whose last fetch failed (status = 'not_loaded')."""
+    """Donors whose page failed to load or whose index check failed."""
     with get_connection() as conn:
         return conn.execute(
-            "SELECT * FROM donors WHERE task_id = ? AND status = 'not_loaded' ORDER BY id",
+            f"SELECT * FROM donors WHERE {_FAILED_DONOR_SQL} ORDER BY id",  # nosec B608
             (task_id,),
         ).fetchall()
 
@@ -369,8 +384,15 @@ def get_pending_donors_for_task(task_id: int) -> list[sqlite3.Row]:
 
 
 def reset_failed_donors(task_id: int) -> None:
-    """Reset only not_loaded donors to pending; leaves found/not_found rows intact."""
+    """Reset failed donors (see get_failed_donors_for_task) to pending; other rows stay.
+
+    Their backlinks are dropped: the re-check stores them again."""
     with get_connection() as conn:
+        conn.execute(
+            f"DELETE FROM backlinks WHERE donor_id IN "  # nosec B608
+            f"(SELECT id FROM donors WHERE {_FAILED_DONOR_SQL})",
+            (task_id,),
+        )
         conn.execute(
             """UPDATE donors SET
                status = 'pending', http_status = NULL, title = NULL,
@@ -380,7 +402,7 @@ def reset_failed_donors(task_id: int) -> None:
                error_code = NULL, html_snippet = NULL,
                google_indexed = NULL, google_index_error = NULL,
                index_submitted_at = NULL, final_url = NULL
-               WHERE task_id = ? AND status = 'not_loaded'""",
+               WHERE """ + _FAILED_DONOR_SQL,  # nosec B608
             (task_id,),
         )
 
@@ -449,23 +471,6 @@ def get_backlinks_for_task(task_id: int) -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
             "SELECT * FROM backlinks WHERE task_id = ? ORDER BY id", (task_id,)
-        ).fetchall()
-
-
-def get_backlinks_for_donor(donor_id: int) -> list[sqlite3.Row]:
-    with get_connection() as conn:
-        return conn.execute(
-            "SELECT * FROM backlinks WHERE donor_id = ? ORDER BY id", (donor_id,)
-        ).fetchall()
-
-
-def get_anchor_stats(task_id: int) -> list[sqlite3.Row]:
-    with get_connection() as conn:
-        return conn.execute(
-            """SELECT anchor_text, COUNT(*) as cnt
-               FROM backlinks WHERE task_id = ?
-               GROUP BY anchor_text ORDER BY cnt DESC""",
-            (task_id,)
         ).fetchall()
 
 

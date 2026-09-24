@@ -42,6 +42,7 @@ from gui.app import MainApp
 
 def main():
     db.init_db()
+    db.reset_interrupted_tasks()
 
     # Tell Windows to use our EXE icon in the taskbar instead of the generic Python one.
     # Must be set before QApplication is created.
