@@ -7,7 +7,7 @@ from openpyxl import load_workbook
 
 from core.models import BacklinkInfo
 from db import database as db
-from export.excel_export import _format_submitted_at, export_to_excel
+from export.excel_export import _format_submitted_at, export_filename, export_to_excel
 
 
 class ExcelExportTest(unittest.TestCase):
@@ -45,6 +45,7 @@ class ExcelExportTest(unittest.TestCase):
             index_baidu="closed",
             google_indexed="indexed",
             html_snippet="<html><title>Open page</title></html>",
+            final_url="https://donor-open.example/final",
         )
         db.update_donor(
             int(donors[1]["id"]),
@@ -54,6 +55,7 @@ class ExcelExportTest(unittest.TestCase):
             index_google="closed",
             google_indexed="not_indexed",
             index_submitted_at="2026-01-01T21:00:00Z",
+            final_url="https://donor-closed.example/2#top",
         )
         db.update_donor(
             int(donors[2]["id"]),
@@ -113,6 +115,66 @@ class ExcelExportTest(unittest.TestCase):
         self.assertEqual(rows["Отправка на индексацию"], "SpeedyIndex")
         self.assertEqual(rows["Доноров отправлено на индексацию"], 1)
         self.assertNotIn("Индекс Google", "".join(str(k) for k in rows))
+
+    def test_data_sheets_freeze_header_and_filter(self):
+        for name in ("По доменам", "Доноры", "Бэклинки", "Топ анкоры"):
+            ws = self.wb[name]
+            self.assertEqual(ws.freeze_panes, "A2", name)
+            self.assertEqual(ws.auto_filter.ref, ws.dimensions, name)
+        self.assertIsNone(self.wb["Сводка"].auto_filter.ref)
+
+    def test_donors_have_status_and_final_url(self):
+        rows = self._sheet_map("Доноры")
+        headers = rows[0]
+        by_url = {r[0]: r for r in rows[1:]}
+        status = headers.index("Статус")
+        final = headers.index("Итоговый URL")
+        self.assertEqual(status, 1)  # right after the donor URL
+        self.assertEqual(by_url["https://donor-open.example/1"][status], "Найдено")
+        self.assertEqual(by_url["https://donor-skip.example/4"][status], "Не загружено")
+        self.assertEqual(
+            by_url["https://donor-open.example/1"][final], "https://donor-open.example/final"
+        )
+        # No redirect (only browser normalisation) → the column stays empty.
+        self.assertIn(by_url["https://donor-closed.example/2"][final], (None, ""))
+        ws = self.wb["Доноры"]
+        fills = {
+            ws.cell(row=r, column=1).value: ws.cell(row=r, column=status + 1).fill.fgColor.rgb
+            for r in range(2, ws.max_row + 1)
+        }
+        self.assertEqual(fills["https://donor-open.example/1"], "FFC8F7DC")
+        self.assertEqual(fills["https://donor-skip.example/4"], "FFFFCDD2")
+
+    def test_anchor_numbers_are_numeric(self):
+        ws = self.wb["Топ анкоры"]
+        headers = [c.value for c in ws[1]]
+        self.assertEqual(headers, ["Анкор", "Ссылки", "Домены", "Dofollow", "Nofollow", "% от общего"])
+        row = list(ws[2])
+        self.assertEqual([c.value for c in row[:5]], ["купить", 1, 1, 1, 0])
+        self.assertEqual(row[5].value, 1.0)
+        self.assertEqual(row[5].number_format, "0.0%")
+
+    def test_cell_styling_is_kept(self):
+        ws = self.wb["Доноры"]
+        headers = [c.value for c in ws[1]]
+        header = ws.cell(row=1, column=1)
+        self.assertTrue(header.font.bold)
+        self.assertEqual(header.fill.fgColor.rgb, "FF1E1E3A")
+        col = {name: i + 1 for i, name in enumerate(headers)}
+        fills = {}
+        for r in range(2, ws.max_row + 1):
+            url = ws.cell(row=r, column=1).value
+            fills[url] = (
+                ws.cell(row=r, column=col["Robots Google"]).fill.fgColor.rgb,
+                ws.cell(row=r, column=col["В индексе Google"]).fill.fgColor.rgb,
+                ws.cell(row=r, column=col["HTTP статус"]).fill.fgColor.rgb,
+            )
+        self.assertEqual(fills["https://donor-open.example/1"], ("FFC8F7DC", "FFC8F7DC", "FFC8F7DC"))
+        self.assertEqual(fills["https://donor-closed.example/2"][:2], ("FFFFCDD2", "FFFFCDD2"))
+        # Zebra striping on even rows, thin borders everywhere.
+        self.assertEqual(ws.cell(row=2, column=col["Title"]).fill.fgColor.rgb, "FFF5F5FF")
+        self.assertEqual(ws.cell(row=3, column=col["Title"]).fill.patternType, None)
+        self.assertEqual(ws.cell(row=3, column=1).border.left.style, "thin")
 
     def test_donor_headers_use_robots_and_serp_labels(self):
         headers = self._sheet_map("Доноры")[0]
@@ -219,3 +281,22 @@ class FormatSubmittedAtTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExportFilenameTest(unittest.TestCase):
+    def test_uses_task_name(self):
+        self.assertEqual(export_filename("Крауд сентябрь", 3), "Крауд сентябрь.xlsx")
+
+    def test_strips_characters_forbidden_in_file_names(self):
+        self.assertEqual(export_filename('a/b\\c:d*e?"f<g>h|i', 3), "a_b_c_d_e_f_g_h_i.xlsx")
+
+    def test_falls_back_to_task_id(self):
+        self.assertEqual(export_filename("  ", 7), "task_7.xlsx")
+        self.assertEqual(export_filename("...", 7), "task_7.xlsx")
+
+    def test_windows_reserved_names_are_avoided(self):
+        self.assertEqual(export_filename("CON", 1), "CON_.xlsx")
+        self.assertEqual(export_filename("com1", 1), "com1_.xlsx")
+
+    def test_long_names_are_cut(self):
+        self.assertLessEqual(len(export_filename("я" * 500, 1)), 105)
