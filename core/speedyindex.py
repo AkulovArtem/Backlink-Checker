@@ -206,7 +206,7 @@ def _http_json(
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("Разрешены только http/https URL")
-    req_headers = {"User-Agent": "BacklinkChecker/1.6"}
+    req_headers = {"User-Agent": "BacklinkChecker/1.7"}
     if headers:
         req_headers.update(headers)
     data = body.encode("utf-8") if body else None

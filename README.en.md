@@ -1,6 +1,6 @@
 **Language:** [Русский](README.md) · English
 
-# Backlink Checker 1.6.0
+# Backlink Checker 1.7.0
 
 A free Windows and macOS app that checks donor pages for links to your sites, inspects those links, and optionally looks up whether the page is in Google’s index.
 
@@ -8,15 +8,21 @@ Pages are opened in a real Chromium browser, so links that appear after JavaScri
 
 Website: [artemakulov.ru/backlink-checker](https://artemakulov.ru/backlink-checker/)  
 Telegram: [t.me/akulov_pro](https://t.me/akulov_pro)  
-Download for Windows x64: [BacklinkChecker.exe](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.6.0/BacklinkChecker.exe)  
-Download for macOS (Apple Silicon, M1–M6): [BacklinkChecker-1.6.0-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.6.0/BacklinkChecker-1.6.0-macos-arm64.dmg)
+Download for Windows x64: [BacklinkChecker.exe](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.7.0/BacklinkChecker.exe)  
+Download for macOS (Apple Silicon, M1–M6): [BacklinkChecker-1.7.0-macos-arm64.dmg](https://github.com/AkulovArtem/Backlink-Checker/releases/download/v1.7.0/BacklinkChecker-1.7.0-macos-arm64.dmg)
 
-## What’s new in 1.6.0
+## What’s new in 1.7.0
 
-- Third Google-index provider: [JSON SEO](https://jsonseo.ru/docs#google-xml) alongside XMLRiver and XMLStock
-- Submit unindexed donors to [SpeedyIndex](https://speedyindex.com/): automatically after a check, or manually from Actions
-- Excel: “Submitted for indexing” column, submission date, and a SpeedyIndex summary
-- JSON SEO and SpeedyIndex keys live in Settings; balances load automatically
+- More accurate Google index check: pages with Cyrillic URLs and home pages no longer get a false “Not indexed” (XMLStock, JSON SEO); IDN domains are matched in any spelling
+- More accurate link detection: IDN domains in punycode and Unicode, links with a port, robots `none` and multiple meta robots tags; words in anchors with nested tags are no longer glued together
+- Stop, retry and delete act instantly; tasks left “Running” after a crash go back to the queue
+- “Retry failed” also re-runs failed Google index checks (e.g. when the provider was down)
+- Redesigned report: drop-down filters, search-engine switch inside the Indexability card, a fast donors table for 100,000 rows; sorting and scroll position survive live updates
+- Excel: export runs in the background and ~25× faster, frozen header and filters, “Status” and “Final URL” columns, percentages as numbers, file named after the task
+- .txt import in any encoding: UTF-8 (with BOM), UTF-16, Windows-1251
+- SpeedyIndex: a failed submission no longer marks URLs as submitted
+- Service keys and URLs are masked in Settings
+- Chromium 153 (Playwright 1.63)
 
 ## Who it’s for
 
@@ -58,7 +64,7 @@ For each page, separately for Google, Yandex, Bing, and Baidu:
 ### Google index
 
 - Yes / No / Error / not checked
-- “IN GOOGLE” column filter in the report
+- “In Google” filter on the Donors tab
 - in Excel — separate columns for “In Google index”, “Google index error”, “Submitted for indexing”, and the submission date
 
 ### Technical data
@@ -71,9 +77,9 @@ HTTP status, title, HTML snippet, internal and external link counts, error codes
 2. Open Settings and paste your XMLRiver and/or XMLStock URL and/or JSON SEO key. For indexing submissions, add a SpeedyIndex key. The balance loads automatically. Buttons: Cancel and Save. You can also wipe the task database there.
 3. On the main screen click “+ Create task” and fill in the fields. For a Google index check, enable the checkbox and pick XMLRiver, XMLStock, or JSON SEO — the balance is shown next to it. To submit unindexed URLs after the check, enable “Send for indexing” (SpeedyIndex). In a finished report you can do the same manually: Actions → Send for indexing (HTTP 200, acceptor found, not in Google).
 4. The check runs in several threads. Click a task to open the live report.
-5. If a check was stopped: ⋮ menu → Resume check. “Retry failed” re-runs load errors only.
+5. If a check was stopped: ⋮ menu → Resume check. “Retry failed” re-runs load errors and failed Google index checks (e.g. when the provider was down).
 6. To add links or acceptors to a finished task: ⋮ menu → Add links. Only new donors are checked; old results stay.
-7. Review results in the app or export to Excel (5 sheets: summary, domains, donors, backlinks, top anchors).
+7. Review results in the app or export to Excel (5 sheets: summary, domains, donors, backlinks, top anchors; with a frozen header and filters).
 
 ## Statuses and errors
 
