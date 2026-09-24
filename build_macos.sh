@@ -76,6 +76,25 @@ fi
 
 # Ad-hoc signature so the local copy launches. Downloaded DMG still needs
 # right-click → Open because there is no Apple Developer ID.
+# Chromium goes in unmodified (see BacklinkChecker.macos.spec), next to the
+# other bundled binaries: main.py points PLAYWRIGHT_BROWSERS_PATH at _MEIPASS.
+SHELL_DIR="$("$PYTHON" - <<'PY'
+import json
+from pathlib import Path
+import playwright
+pkg = Path(playwright.__file__).parent / "driver" / "package" / "browsers.json"
+rev = next(b["revision"] for b in json.loads(pkg.read_text())["browsers"]
+           if b["name"] == "chromium-headless-shell")
+print(Path.home() / "Library" / "Caches" / "ms-playwright" / f"chromium_headless_shell-{rev}")
+PY
+)"
+if [[ ! -d "$SHELL_DIR" ]]; then
+  echo "[ERROR] $SHELL_DIR not found"
+  exit 1
+fi
+ditto "$SHELL_DIR" "$APP_PATH/Contents/Frameworks/$(basename "$SHELL_DIR")"
+echo "Bundled $(basename "$SHELL_DIR")"
+
 codesign --force --deep --sign - "$APP_PATH"
 
 echo
