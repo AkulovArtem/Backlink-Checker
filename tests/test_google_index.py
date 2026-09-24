@@ -2,6 +2,7 @@ import unittest
 from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
 
 from core.google_index import (
     PROVIDER_JSONSEO,
@@ -19,7 +20,6 @@ from core.google_index import (
     parse_index_xml,
     parse_user_key,
     pick_provider,
-    site_query_target,
     urls_match,
 )
 
@@ -142,13 +142,11 @@ class ParseBalanceTest(unittest.TestCase):
         r = parse_balance_body("15.50")
         self.assertTrue(r.ok)
         self.assertEqual(r.amount, 15.5)
-        self.assertTrue(r.is_usable)
 
     def test_zero(self):
         r = parse_balance_body("0")
         self.assertTrue(r.ok)
         self.assertEqual(r.amount, 0.0)
-        self.assertFalse(r.is_usable)
 
     def test_json(self):
         r = parse_balance_body('{"balance": "120,00"}')
@@ -349,6 +347,10 @@ class NeedsBalanceFetchTest(unittest.TestCase):
         self.assertFalse(needs_balance_fetch(PROVIDER_JSONSEO, PROVIDER_RIVER))
 
 
+def _query_of(request_url: str) -> str:
+    return parse_qs(urlparse(request_url).query)["query"][0]
+
+
 class RequestUrlTest(unittest.TestCase):
     def test_river_inindex(self):
         p = IndexProvider(
@@ -361,18 +363,24 @@ class RequestUrlTest(unittest.TestCase):
         self.assertIn("query=", url)
         self.assertIn("groupby=10", url)
 
-    def test_stock_site_query(self):
+    def test_stock_queries_the_url_itself(self):
+        # Live XMLStock/JSON SEO: "site:host/кириллица" always returns nothing and
+        # "site:host" can miss the home page; the URL as the query finds both.
         p = IndexProvider(
             PROVIDER_STOCK,
             "https://xmlstock.com/google/xml/?user=1&key=a",
         )
-        url = build_index_request_url(p, "https://ex.com/x?id=1")
-        self.assertIn("site%3A", url)
-        self.assertNotIn("https%3A", url.split("query=")[1])
-        self.assertIn("id%3D1", url)
+        url = build_index_request_url(p, "https://ex.com/x?id=1#top")
+        self.assertEqual(_query_of(url), "https://ex.com/x?id=1")
         self.assertIn("nfpr=1", url)
         self.assertIn("groupby=10", url)
-        self.assertEqual(site_query_target("https://www.wikipedia.org/"), "www.wikipedia.org")
+
+    def test_cyrillic_url_is_queried_decoded(self):
+        p = IndexProvider(PROVIDER_STOCK, "https://xmlstock.com/google/xml/?user=1&key=a")
+        url = build_index_request_url(
+            p, "https://ru.wikipedia.org/wiki/%D0%A0%D0%BE%D1%81%D1%81%D0%B8%D1%8F"
+        )
+        self.assertEqual(_query_of(url), "https://ru.wikipedia.org/wiki/Россия")
 
     def test_groupby_10_overrides_account_top100(self):
         p = IndexProvider(
@@ -389,14 +397,13 @@ class RequestUrlTest(unittest.TestCase):
         )
         self.assertIn("/google/xml/", ep)
 
-    def test_jsonseo_site_query(self):
+    def test_jsonseo_queries_the_url_itself(self):
         p = IndexProvider(
             PROVIDER_JSONSEO,
             "https://jsonseo.ru/api/google/xml?key=abc",
         )
         url = build_index_request_url(p, "https://ex.com/x?id=1")
-        self.assertIn("site%3A", url)
-        self.assertNotIn("https%3A", url.split("query=")[1])
+        self.assertEqual(_query_of(url), "https://ex.com/x?id=1")
         self.assertIn("nfpr=1", url)
         self.assertIn("groupby=10", url)
         self.assertIn("key=abc", url)
@@ -453,20 +460,27 @@ class UrlMatchTest(unittest.TestCase):
             urls_match("https://ex.com/p?b=2&a=1", "https://ex.com/p?a=1&b=2")
         )
 
+    def test_idn_and_percent_encoding_are_equivalent(self):
+        self.assertTrue(urls_match(
+            "https://пример.рф/страница",
+            "https://xn--e1afmkfd.xn--p1ai/%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D0%B0",
+        ))
+        self.assertTrue(urls_match(
+            "https://site.ru/статья?q=тест",
+            "https://site.ru/%D1%81%D1%82%D0%B0%D1%82%D1%8C%D1%8F?q=%D1%82%D0%B5%D1%81%D1%82",
+        ))
+        self.assertFalse(urls_match("https://site.ru/статья", "https://site.ru/стать"))
+        # Uppercase Cyrillic: case must be folded after decoding %D0%9F → "П".
+        self.assertTrue(urls_match(
+            "https://site.ru/Привет?q=Тест",
+            "https://site.ru/%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82?q=%D0%A2%D0%B5%D1%81%D1%82",
+        ))
+
     def test_fragment_is_ignored(self):
         self.assertTrue(
             urls_match("https://ex.com/p#top", "https://ex.com/p")
         )
 
-    def test_site_query_keeps_query_drops_scheme_and_slash(self):
-        self.assertEqual(
-            site_query_target("https://ex.com/p?id=1"),
-            "ex.com/p?id=1",
-        )
-        self.assertEqual(
-            site_query_target("https://ex.com/foo/"),
-            "ex.com/foo",
-        )
 
 
 class CheckUrlIndexedHttpTest(unittest.TestCase):

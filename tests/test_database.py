@@ -203,6 +203,38 @@ class AddDonorsToTaskTest(unittest.TestCase):
             ["example.com", "new.com"],
         )
 
+    def test_failed_includes_index_errors_and_retry_drops_their_backlinks(self):
+        from core.models import BacklinkInfo
+        tid = db.create_task("idx", ["example.com"], check_google_index=True)
+        db.create_donors_bulk(tid, ["https://a.ex/1", "https://b.ex/2", "https://c.ex/3"])
+        a, b, c = db.get_donors_for_task(tid)
+        db.update_donor(a["id"], status="found", http_status=200, google_indexed="error")
+        db.update_donor(b["id"], status="found", http_status=200, google_indexed="indexed")
+        db.update_donor(c["id"], status="not_loaded", error_code="TIMEOUT")
+        link = BacklinkInfo("https://example.com/", "x", "text", "dofollow", "")
+        db.create_backlinks_bulk(a["id"], tid, [link])
+        db.create_backlinks_bulk(b["id"], tid, [link])
+
+        failed = {r["url"] for r in db.get_failed_donors_for_task(tid)}
+        self.assertEqual(failed, {"https://a.ex/1", "https://c.ex/3"})
+
+        db.reset_failed_donors(tid)
+        pending = {r["url"] for r in db.get_pending_donors_for_task(tid)}
+        self.assertEqual(pending, {"https://a.ex/1", "https://c.ex/3"})
+        # The re-check re-inserts a's backlinks, so the old ones must go; b's stay.
+        owners = [r["donor_id"] for r in db.get_backlinks_for_task(tid)]
+        self.assertEqual(owners, [b["id"]])
+
+    def test_reset_interrupted_tasks_only_touches_running(self):
+        running = db.create_task("r", ["example.com"])
+        done = db.create_task("d", ["example.com"])
+        db.update_task_status(running, "running", 42)
+        db.update_task_status(done, "completed", 100)
+        self.assertEqual(db.reset_interrupted_tasks(), 1)
+        self.assertEqual(db.get_task(running)["status"], "pending")
+        self.assertEqual(db.get_task(running)["progress"], 0)
+        self.assertEqual(db.get_task(done)["status"], "completed")
+
     def test_wipe_check_data_deletes_tasks_keeps_settings(self):
         db.set_setting("theme", "dark")
         db.set_setting("xmlriver_url", "http://xmlriver.com/search/xml?user=1&key=a")

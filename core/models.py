@@ -5,11 +5,19 @@ if TYPE_CHECKING:
     from core.google_index import IndexProvider
 
 HTML_SNIPPET_MAX = 500
+# A link wrapped around a whole article yields tens of thousands of characters.
+ANCHOR_TEXT_MAX = 500
 
 
 def clip_html_snippet(html: str | None) -> str:
     """Keep a short page excerpt so 100k-donor tasks do not bloat SQLite."""
     return (html or "")[:HTML_SNIPPET_MAX]
+
+
+def clip_anchor_text(text: str) -> str:
+    if len(text) <= ANCHOR_TEXT_MAX:
+        return text
+    return text[: ANCHOR_TEXT_MAX - 1].rstrip() + "…"
 
 
 @dataclass

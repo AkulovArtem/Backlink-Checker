@@ -1,4 +1,4 @@
-"""Google index check via XMLRiver (inindex) or XMLStock (site: query)."""
+"""Google index check via XMLRiver (inindex), XMLStock or JSON SEO (URL query)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,10 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, unquote, urldefrag, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
+
+from utils.url_utils import get_domain
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +45,6 @@ class BalanceResult:
     ok: bool
     amount: float | None = None
     error: str = ""
-
-    @property
-    def is_usable(self) -> bool:
-        return self.ok and self.amount is not None and self.amount > 0
 
 
 @dataclass
@@ -167,15 +165,23 @@ def parse_balance_body(body: str) -> BalanceResult:
 def _canonical_query(query: str) -> str:
     if not query:
         return ""
-    pairs = sorted(parse_qsl(query, keep_blank_values=True))
+    # Fold case after decoding: "%D0%A2" and "т" must compare equal.
+    pairs = sorted(
+        (k.lower(), v.lower()) for k, v in parse_qsl(query, keep_blank_values=True)
+    )
     return urlencode(pairs)
 
 
 def _normalize_url(url: str) -> str:
     raw = (url or "").strip().lower()
-    parsed = urlparse(raw)
-    host = parsed.netloc.removeprefix("www.")
-    path = parsed.path.rstrip("/") or ""
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return raw
+    # Same URL may come back as "пример.рф/путь" or "xn--…/%D0%BF…":
+    # compare punycode hosts and decoded paths.
+    host = get_domain(raw) if parsed.netloc else ""
+    path = unquote(parsed.path).lower().rstrip("/") or ""
     base = f"{host}{path}"
     query = _canonical_query(parsed.query)
     return f"{base}?{query}" if query else base
@@ -427,19 +433,12 @@ def _with_query(endpoint: str, extra: dict[str, str]) -> str:
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
-def site_query_target(page_url: str) -> str:
-    """host + path [+ query] without scheme — Google site: does not take https://."""
-    parsed = urlparse(page_url.strip())
-    host = parsed.netloc or parsed.path.split("/")[0]
-    path = parsed.path if parsed.netloc else ""
-    if path == "/":
-        path = ""
-    else:
-        path = path.rstrip("/")
-    target = f"{host}{path}"
-    if parsed.query:
-        target = f"{target}?{parsed.query}"
-    return target
+def url_query(page_url: str) -> str:
+    """The page URL itself as the search query (fragment dropped, %-escapes
+    decoded). Checked live on XMLStock and JSON SEO: "site:host/путь" returns
+    nothing for Cyrillic paths and "site:host" can miss the home page, while
+    the URL query lists the page first; exact matching keeps it precise."""
+    return unquote(urldefrag(page_url.strip()).url)
 
 
 def build_index_request_url(provider: IndexProvider, page_url: str) -> str:
@@ -453,7 +452,7 @@ def build_index_request_url(provider: IndexProvider, page_url: str) -> str:
     return _with_query(
         provider.endpoint,
         {
-            "query": f"site:{site_query_target(page_url)}",
+            "query": url_query(page_url),
             "nfpr": "1",
             "groupby": "10",
         },

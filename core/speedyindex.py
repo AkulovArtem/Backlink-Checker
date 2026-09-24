@@ -285,7 +285,8 @@ def submit_urls(api_key: str, urls: list[str], title: str = "") -> SubmitResult:
                 body=payload,
             )
         except HTTPError as exc:
-            parsed = _submit_result_from_http_error(exc, submitted=len(chunk))
+            # The failed chunk was not accepted — only earlier chunks count.
+            parsed = _submit_result_from_http_error(exc, submitted=submitted)
             if submitted:
                 parsed.submitted = submitted
                 parsed.task_id = last_id

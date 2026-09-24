@@ -19,11 +19,12 @@ BOT_NAMES = {
 
 def _parse_directives(content: str) -> set[str]:
     """Parse comma-separated robots directives into a lowercase set."""
-    return {d.strip().lower() for d in content.split(",")}
+    return {d.strip().lower() for d in content.split(",") if d.strip()}
 
 
 def _is_noindex(directives: set[str]) -> bool:
-    return "noindex" in directives
+    # "none" is shorthand for "noindex, nofollow"
+    return "noindex" in directives or "none" in directives
 
 
 def check_indexability(soup: BeautifulSoup, response_headers: dict) -> IndexabilityResult:
@@ -35,7 +36,8 @@ def check_indexability(soup: BeautifulSoup, response_headers: dict) -> Indexabil
         name = str(tag.get("name") or "").lower()
         content = str(tag.get("content") or "")
         if name in {"robots", "googlebot", "yandexbot", "bingbot", "baiduspider"}:
-            meta_values[name] = _parse_directives(content)
+            # Several tags with the same name all apply — merge, never overwrite.
+            meta_values.setdefault(name, set()).update(_parse_directives(content))
 
     all_meta_parts = []
     for name, directives in meta_values.items():
