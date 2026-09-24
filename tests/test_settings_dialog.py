@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLineEdit
 
 from core.google_index import PROVIDER_RIVER, BalanceResult
 from db import database as db
@@ -31,6 +31,15 @@ class SettingsDialogCloseTest(unittest.TestCase):
     def tearDown(self):
         db.DB_PATH = self._old_path
         self._tmp.cleanup()
+
+    def test_keys_are_masked_until_revealed(self):
+        dlg = SettingsDialog()
+        edits = (dlg._river_edit, dlg._stock_edit, dlg._jsonseo_edit, dlg._speedy_edit)
+        self.assertTrue(all(e.echoMode() == QLineEdit.EchoMode.Password for e in edits))
+        dlg._show_keys.setChecked(True)
+        self.assertTrue(all(e.echoMode() == QLineEdit.EchoMode.Normal for e in edits))
+        self.assertEqual(dlg._wipe_btn.objectName(), "btnDanger")
+        dlg.close()
 
     def test_refresh_after_close_does_not_start_worker(self):
         dlg = SettingsDialog()

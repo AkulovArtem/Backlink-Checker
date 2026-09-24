@@ -5,16 +5,34 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QAbstractItemModel, QEvent, QSortFilterProxyModel, Qt
 from PyQt6.QtWidgets import QApplication, QLabel
 
 from db import database as db
 from gui.report_view import (
+    COL_D_GOOGLE,
+    COL_D_INT,
+    COL_D_ROBOTS,
+    COL_D_URL,
+    DonorTableModel,
     ReportView,
-    donor_url_html,
+    _badge,
     matches_google_filter,
     matches_robots_filter,
 )
+
+
+def _set_filter(view: ReportView, key: str, value: str) -> None:
+    combo = view._filter_combos[key]
+    combo.setCurrentIndex(combo.findData(value))
+
+
+def _rows(view: ReportView) -> int:
+    return view._donor_proxy.rowCount()
+
+
+def _cell(view: ReportView, row: int, col: int) -> str:
+    return view._donor_proxy.index(row, col).data()
 
 
 class ReportViewLoadTest(unittest.TestCase):
@@ -55,7 +73,7 @@ class ReportViewLoadTest(unittest.TestCase):
         view = ReportView()
         view.load_task(tid)
         html = " ".join(lbl.text() for lbl in view.findChildren(QLabel))
-        self.assertIn("СТАТУС ДОНОРОВ", html)
+        self.assertIn("Статус доноров", html)
         self.assertIn("■ В очереди", html)
         self.assertIn("<b>1</b>", html)
 
@@ -95,7 +113,7 @@ class ReportViewLoadTest(unittest.TestCase):
         view = ReportView()
         view.load_task(tid)
         html = " ".join(lbl.text() for lbl in view.findChildren(QLabel))
-        self.assertIn("В ИНДЕКСЕ GOOGLE", html)
+        self.assertIn("В индексе Google", html)
         self.assertIn("Не проверялось", html)
         self.assertIn("<b>1</b>", html)
 
@@ -121,43 +139,49 @@ class ReportViewLoadTest(unittest.TestCase):
         )
         return tid
 
-    def test_google_filter_buttons_exist_next_to_robots(self):
+    def test_google_filter_offers_every_state(self):
         view = ReportView()
         view.load_task(self._task_with_google_states())
-        btns = getattr(view, "_google_btns", {})
-        self.assertEqual(
-            set(btns),
-            {"all", "indexed", "not_indexed", "error", "unchecked"},
-        )
-        self.assertTrue(btns["all"].isChecked())
+        combo = view._filter_combos["google"]
+        values = {combo.itemData(i) for i in range(combo.count())}
+        self.assertEqual(values, {"all", "indexed", "not_indexed", "error", "unchecked"})
+        self.assertEqual(combo.currentData(), "all")
+        self.assertTrue(view._reset_filters_btn.isHidden())
 
     def test_google_filter_indexed_shows_only_yes_rows(self):
         view = ReportView()
         view.load_task(self._task_with_google_states())
-        self.assertEqual(view._donor_table.rowCount(), 4)
-        btns = getattr(view, "_google_btns", {})
-        self.assertIn("indexed", btns)
-        btns["indexed"].click()
-        self.assertEqual(view._donor_table.rowCount(), 1)
-        self.assertEqual(view._donor_table.item(0, 2).text(), "Да")
+        self.assertEqual(_rows(view), 4)
+        _set_filter(view, "google", "indexed")
+        self.assertEqual(_rows(view), 1)
+        self.assertEqual(_cell(view, 0, COL_D_GOOGLE), "Да")
+        self.assertFalse(view._reset_filters_btn.isHidden())
 
     def test_google_filter_unchecked_shows_dash_rows(self):
         view = ReportView()
         view.load_task(self._task_with_google_states())
-        btns = getattr(view, "_google_btns", {})
-        self.assertIn("unchecked", btns)
-        btns["unchecked"].click()
-        self.assertEqual(view._donor_table.rowCount(), 1)
-        self.assertEqual(view._donor_table.item(0, 2).text(), "—")
+        _set_filter(view, "google", "unchecked")
+        self.assertEqual(_rows(view), 1)
+        self.assertEqual(_cell(view, 0, COL_D_GOOGLE), "—")
+
+    def test_reset_clears_every_filter(self):
+        view = ReportView()
+        view.load_task(self._task_with_google_states())
+        _set_filter(view, "google", "indexed")
+        _set_filter(view, "status", "found")
+        view._reset_filters_btn.click()
+        self.assertEqual(view._donor_filter_google, "all")
+        self.assertEqual(view._filter_combos["status"].currentData(), "all")
+        self.assertEqual(_rows(view), 4)
 
     def test_google_filter_survives_report_refresh(self):
         view = ReportView()
         view.load_task(self._task_with_google_states())
-        view._google_btns["indexed"].click()
+        _set_filter(view, "google", "indexed")
         view.refresh()
-        self.assertTrue(view._google_btns["indexed"].isChecked())
-        self.assertEqual(view._donor_table.rowCount(), 1)
-        self.assertEqual(view._donor_table.item(0, 2).text(), "Да")
+        self.assertEqual(view._filter_combos["google"].currentData(), "indexed")
+        self.assertEqual(_rows(view), 1)
+        self.assertEqual(_cell(view, 0, COL_D_GOOGLE), "Да")
 
     def test_google_filter_resets_when_opening_another_task(self):
         tid1 = self._task_with_google_states()
@@ -165,13 +189,13 @@ class ReportViewLoadTest(unittest.TestCase):
         db.create_donors_bulk(tid2, ["https://other.example/1"])
         view = ReportView()
         view.load_task(tid1)
-        view._google_btns["indexed"].click()
+        _set_filter(view, "google", "indexed")
         view._donor_search.setText("yes.example")
         view.load_task(tid2)
         self.assertEqual(view._donor_filter_google, "all")
-        self.assertTrue(view._google_btns["all"].isChecked())
+        self.assertEqual(view._filter_combos["google"].currentData(), "all")
         self.assertEqual(view._donor_search.text(), "")
-        self.assertEqual(view._donor_table.rowCount(), 1)
+        self.assertEqual(_rows(view), 1)
 
     def test_robots_filter_has_unchecked_and_hides_open_closed(self):
         tid = db.create_task("robots", ["example.com"])
@@ -183,11 +207,9 @@ class ReportViewLoadTest(unittest.TestCase):
         db.update_donor(int(donors[0]["id"]), status="found", index_google="open")
         view = ReportView()
         view.load_task(tid)
-        btns = getattr(view, "_index_btns", {})
-        self.assertIn("unchecked", btns)
-        btns["unchecked"].click()
-        self.assertEqual(view._donor_table.rowCount(), 1)
-        self.assertEqual(view._donor_table.item(0, 1).text(), "—")
+        _set_filter(view, "index", "unchecked")
+        self.assertEqual(_rows(view), 1)
+        self.assertEqual(_cell(view, 0, COL_D_ROBOTS), "—")
 
     def test_donor_row_stores_html_snippet_for_menu(self):
         tid = db.create_task("html", ["example.com"])
@@ -196,9 +218,9 @@ class ReportViewLoadTest(unittest.TestCase):
         db.update_donor(int(donor["id"]), html_snippet="<p>page</p>")
         view = ReportView()
         view.load_task(tid)
-        item = view._donor_table.item(0, 4)
-        self.assertIsNotNone(item)
-        self.assertEqual(item.data(Qt.ItemDataRole.UserRole + 1), "<p>page</p>")
+        donor = view._donor_at(view._donor_proxy.index(0, COL_D_URL))
+        self.assertIsNotNone(donor)
+        self.assertEqual(donor["html_snippet"], "<p>page</p>")
 
     def test_status_filter_pending_shows_only_queue(self):
         tid = db.create_task("st", ["example.com"])
@@ -210,21 +232,70 @@ class ReportViewLoadTest(unittest.TestCase):
         db.update_donor(int(donors[0]["id"]), status="found")
         view = ReportView()
         view.load_task(tid)
-        btns = getattr(view, "_status_btns", {})
-        self.assertIn("pending", btns)
-        btns["pending"].click()
-        self.assertEqual(view._donor_table.rowCount(), 1)
-        url_widget = view._donor_table.cellWidget(0, 0)
-        self.assertIn("wait.example", url_widget.text() if url_widget else "")
+        _set_filter(view, "status", "pending")
+        self.assertEqual(_rows(view), 1)
+        self.assertIn("wait.example", _cell(view, 0, COL_D_URL))
 
     def test_google_filter_survives_se_tab_switch(self):
         view = ReportView()
         view.load_task(self._task_with_google_states())
-        getattr(view, "_google_btns", {})["error"].click()
-        self.assertEqual(view._donor_table.rowCount(), 1)
+        _set_filter(view, "google", "error")
+        self.assertEqual(_rows(view), 1)
         view._switch_se("yandex")
-        self.assertEqual(view._donor_table.rowCount(), 1)
-        self.assertEqual(view._donor_table.item(0, 2).text(), "Ошибка")
+        self.assertEqual(_rows(view), 1)
+        self.assertEqual(_cell(view, 0, COL_D_GOOGLE), "Ошибка")
+        header = view._donor_proxy.headerData(COL_D_ROBOTS, Qt.Orientation.Horizontal)
+        self.assertEqual(header, "Robots (Яндекс)")
+        self.assertTrue(view._se_btns["yandex"].isChecked())
+        self.assertFalse(view._se_btns["google"].isChecked())
+
+    def _big_task(self) -> int:
+        tid = db.create_task("big", ["example.com"])
+        db.create_donors_bulk(tid, [f"https://d{i}.example/p" for i in range(300)])
+        with db.get_connection() as conn:
+            conn.execute(
+                "UPDATE donors SET status = 'found', internal_links = id % 97 WHERE task_id = ?",
+                (tid,),
+            )
+        return tid
+
+    def test_refresh_does_not_leak_donor_models(self):
+        view = ReportView()
+        view.load_task(self._big_task())
+        for _ in range(3):
+            view.refresh()
+        # Run the deleteLater() of the replaced widgets, as the event loop would.
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        models = [
+            m for m in view.findChildren(QAbstractItemModel)
+            if isinstance(m, (DonorTableModel, QSortFilterProxyModel))
+        ]
+        self.assertEqual(len(models), 2)
+
+    def test_refresh_keeps_donor_sort_and_scroll(self):
+        view = ReportView()
+        view.resize(1200, 800)
+        view.show()
+        view.load_task(self._big_task())
+        view._data_tabs.setCurrentIndex(1)
+        self._app.processEvents()
+        view._donor_view.sortByColumn(COL_D_INT, Qt.SortOrder.DescendingOrder)
+        view._donor_view.verticalScrollBar().setValue(40)
+        self._app.processEvents()
+        view.refresh()
+        self._app.processEvents()
+        header = view._donor_view.horizontalHeader()
+        self.assertEqual(header.sortIndicatorSection(), COL_D_INT)
+        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+        self.assertEqual(view._donor_view.verticalScrollBar().value(), 40)
+        view.close()
+
+    def test_opening_another_task_resets_sort(self):
+        view = ReportView()
+        view.load_task(self._big_task())
+        view._donor_view.sortByColumn(COL_D_INT, Qt.SortOrder.DescendingOrder)
+        view.load_task(db.create_task("other", ["example.com"]))
+        self.assertEqual(view._donor_view.horizontalHeader().sortIndicatorSection(), -1)
 
     def test_actions_menu_includes_send_to_index(self):
         tid = db.create_task("idx", ["example.com"])
@@ -234,17 +305,19 @@ class ReportViewLoadTest(unittest.TestCase):
         self.assertIn("Отправить на индексацию", labels)
 
 
-class DonorUrlHtmlTest(unittest.TestCase):
-    def test_ampersand_in_query_is_escaped(self):
-        html = donor_url_html("https://ex.com/x?a=1&b=2", "200", "#00c853")
-        self.assertIn("&amp;", html)
-        self.assertNotIn('href="https://ex.com/x?a=1&b=2"', html)
-        self.assertIn("https://ex.com/x?a=1&amp;b=2", html)
+class BadgeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._app = QApplication.instance() or QApplication([])
 
-    def test_quotes_in_url_are_escaped(self):
-        html = donor_url_html('https://ex.com/"x"', "200", "#00c853")
-        self.assertIn("&quot;", html)
-        self.assertNotIn('href="https://ex.com/"x""', html)
+    def test_fill_is_a_light_tint_of_the_text_colour(self):
+        # "#ffa72618" is ARGB to Qt — it used to paint the badge dark red.
+        sheet = _badge("В процессе", "#ffa726").styleSheet()
+        self.assertIn("rgba(255, 167, 38, 36)", sheet)
+        self.assertIn("color: #ffa726", sheet)
+
+    def test_text_is_plain(self):
+        self.assertEqual(_badge("<b>x</b>", "#888888").textFormat(), Qt.TextFormat.PlainText)
 
 
 class MatchesGoogleFilterTest(unittest.TestCase):

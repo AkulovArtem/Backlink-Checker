@@ -50,6 +50,16 @@ class TaskCreateAppendModeTest(unittest.TestCase):
         db.DB_PATH = self._old_path
         self._tmp.cleanup()
 
+    def test_advanced_settings_collapsed_until_task_customises_them(self):
+        view = TaskCreateView()
+        self.assertTrue(view._settings_body.isHidden())
+        view.enter_append_mode(_TASK, existing_count=1)  # threads 8, timeout 45
+        self.assertFalse(view._settings_body.isHidden())
+        view.reset()
+        self.assertTrue(view._settings_body.isHidden())
+        view._settings_toggle.click()
+        self.assertFalse(view._settings_body.isHidden())
+
     def test_append_mode_keeps_existing_urls_empty_and_unlocks_targets(self):
         view = TaskCreateView()
         view.enter_append_mode(_TASK, existing_count=12)

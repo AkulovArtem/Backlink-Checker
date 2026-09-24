@@ -1,3 +1,6 @@
+ACCENT = "#007AFF"
+
+
 def _make_qss(
     bg, surface, input_bg, border, border_ctrl, text, muted,
     btn_bg, btn_border, btn_hover, btn_pressed,
@@ -8,8 +11,15 @@ def _make_qss(
 QMainWindow, QDialog, QWidget {{
     background-color: {bg};
     color: {text};
-    font-family: 'Segoe UI', Arial, sans-serif;
     font-size: 13px;
+}}
+
+/* Labels inherit the card surface instead of painting the page background. */
+QFrame#card QLabel, QFrame#footerBar QLabel {{ background: transparent; }}
+
+QFrame#footerBar {{
+    background-color: {surface};
+    border-top: 1px solid {border};
 }}
 
 QFrame#card {{
@@ -27,7 +37,7 @@ QPushButton {{
 }}
 QPushButton:hover {{ background-color: {btn_hover}; }}
 QPushButton:pressed {{ background-color: {btn_pressed}; }}
-QPushButton:checked {{ background-color: #00c853; color: #fff; border: none; }}
+QPushButton:checked {{ background-color: {ACCENT}; color: #fff; border: none; }}
 
 QPushButton#btnCreate {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -43,16 +53,52 @@ QPushButton#btnCreate:hover {{
         stop:0 #47B7E8, stop:1 #1C8FFF);
 }}
 
+QPushButton#btnDanger {{
+    background-color: transparent;
+    color: #e53935;
+    border: 1px solid #e53935;
+}}
+QPushButton#btnDanger:hover {{ background-color: rgba(229, 57, 53, 30); }}
+
+QPushButton#btnLink {{
+    background: transparent;
+    border: none;
+    color: {ACCENT};
+    padding: 4px 0;
+    text-align: left;
+    font-weight: bold;
+}}
+QPushButton#btnLink:hover {{ text-decoration: underline; }}
+
+QPushButton#segButton {{
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 4px;
+}}
+
+QCheckBox::indicator, QRadioButton::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid {border_ctrl};
+    background-color: {input_bg};
+}}
+QCheckBox::indicator {{ border-radius: 4px; }}
+QRadioButton::indicator {{ border-radius: 8px; }}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+    background-color: {ACCENT};
+    border: 1px solid {ACCENT};
+}}
+
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {{
     background-color: {input_bg};
     color: {text};
     border: 1px solid {border_ctrl};
     border-radius: 6px;
     padding: 5px 8px;
-    selection-background-color: #00c853;
+    selection-background-color: {ACCENT};
 }}
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
-QSpinBox:focus, QComboBox:focus {{ border: 1px solid #00c853; }}
+QSpinBox:focus, QComboBox:focus {{ border: 1px solid {ACCENT}; }}
 
 QComboBox::drop-down {{ border: none; }}
 QComboBox QAbstractItemView {{
@@ -80,7 +126,6 @@ QHeaderView::section {{
     border-bottom: 1px solid {border};
     padding: 6px 8px;
     font-weight: bold;
-    text-transform: uppercase;
     font-size: 11px;
 }}
 
@@ -118,6 +163,7 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{ background: {tab_sel_bg}; color: {tab_sel_text}; }}
 QTabWidget::pane {{ border: 1px solid {border}; }}
+QTabWidget::tab-bar {{ alignment: left; }}
 
 QProgressBar {{
     background-color: {btn_bg};
@@ -126,7 +172,7 @@ QProgressBar {{
     height: 8px;
     text-align: center;
 }}
-QProgressBar::chunk {{ background-color: #00c853; border-radius: 4px; }}
+QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 4px; }}
 
 QLabel#heading {{
     font-size: 20px;
@@ -262,3 +308,28 @@ LIGHT_QSS = _make_qss(
     tab_sel_bg="#ffffff",
     tab_sel_text="#212121",
 )
+
+
+def make_palette(dark: bool):
+    """QPalette matching the stylesheet: custom-painted widgets (_SegBar, the
+    task-list progress cell) and rich-text links read colours from it."""
+    from PyQt6.QtGui import QColor, QPalette
+
+    colors = {
+        QPalette.ColorRole.Window: "#1a1a2e" if dark else "#f5f5f5",
+        QPalette.ColorRole.WindowText: "#e0e0e0" if dark else "#212121",
+        QPalette.ColorRole.Base: "#16213e" if dark else "#ffffff",
+        QPalette.ColorRole.AlternateBase: "#2a2a4a" if dark else "#e6e6ea",
+        QPalette.ColorRole.Text: "#e0e0e0" if dark else "#212121",
+        QPalette.ColorRole.Button: "#2a2a4a" if dark else "#e0e0e0",
+        QPalette.ColorRole.ButtonText: "#e0e0e0" if dark else "#212121",
+        QPalette.ColorRole.Highlight: ACCENT,
+        QPalette.ColorRole.HighlightedText: "#ffffff",
+        QPalette.ColorRole.Link: "#5aa9ff" if dark else ACCENT,
+        QPalette.ColorRole.LinkVisited: "#5aa9ff" if dark else ACCENT,
+        QPalette.ColorRole.PlaceholderText: "#888888" if dark else "#9e9e9e",
+    }
+    palette = QPalette()
+    for role, value in colors.items():
+        palette.setColor(role, QColor(value))
+    return palette
