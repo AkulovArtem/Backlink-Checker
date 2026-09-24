@@ -8,6 +8,7 @@ from PyQt6.QtCore import QDate, QSortFilterProxyModel, Qt, QUrl
 from PyQt6.QtGui import (
     QColor,
     QDesktopServices,
+    QFont,
     QPainter,
     QPalette,
     QStandardItem,
@@ -32,7 +33,8 @@ from PyQt6.QtWidgets import (
 )
 
 from db import database as db
-from gui.constants import STATUS_COLORS, STATUS_LABELS
+from gui.constants import STATUS_COLORS, STATUS_DOT, STATUS_LABELS
+from gui.theme import ACCENT
 from gui.theme_toggle import ThemeToggle
 
 COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
@@ -40,6 +42,17 @@ COL_CREATED, COL_NAME, COL_DONORS, COL_BACKLINKS, COL_STATUS = range(5)
 # UserRole on the COL_STATUS item stores the integer progress (0-100) for
 # running tasks; None for all other statuses so the delegate falls through.
 _PROGRESS_ROLE = Qt.ItemDataRole.UserRole
+
+
+def _status_text(status: str, progress: int) -> str:
+    label = STATUS_LABELS.get(status, status)
+    if status == "running" and progress > 0:
+        label = f"{label} ({progress}%)"
+    return f"{STATUS_DOT} {label}"
+
+
+def _today() -> QDate:
+    return QDate.currentDate()
 
 
 class _ProgressDelegate(QStyledItemDelegate):
@@ -55,15 +68,19 @@ class _ProgressDelegate(QStyledItemDelegate):
             # Background — palette adapts to theme automatically
             painter.setBrush(option.palette.color(QPalette.ColorRole.AlternateBase))
             painter.drawRoundedRect(rect, 3, 3)
-            # Progress chunk
+            label = f"{progress}%"
+            painter.setPen(option.palette.color(QPalette.ColorRole.Text))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+            # Progress chunk; the label is redrawn white where it overlaps the fill
             if progress > 0:
                 chunk_w = int(rect.width() * progress / 100)
                 chunk_rect = rect.adjusted(0, 0, -(rect.width() - chunk_w), 0)
-                painter.setBrush(QColor("#00c853"))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(ACCENT))
                 painter.drawRoundedRect(chunk_rect, 3, 3)
-            # Label
-            painter.setPen(option.palette.color(QPalette.ColorRole.Text))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"🔄 {progress}%")
+                painter.setClipRect(chunk_rect)
+                painter.setPen(QColor("#ffffff"))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
             painter.restore()
         else:
             super().paint(painter, option, index)
@@ -87,7 +104,7 @@ class _TaskFilterProxy(QSortFilterProxyModel):
         super().__init__(parent)
         self._text = ""
         self._date_from = QDate(2000, 1, 1)
-        self._date_to = QDate.currentDate()
+        self._date_to = _today()
 
     def set_filters(self, text: str, date_from: QDate, date_to: QDate) -> None:
         self._text = text.lower()
@@ -132,6 +149,9 @@ class TaskListView(QWidget):
         self._app = None   # set by app.py
         self._dark_mode = dark_mode
         self._task_row_index: dict[int, int] = {}
+        # "до" tracks today until the user picks another date, so tasks created
+        # after midnight in a long-running session are not filtered out.
+        self._date_to_follows_today = True
         self._build_ui()
         self.refresh()
 
@@ -152,7 +172,6 @@ class TaskListView(QWidget):
         action_bar = QHBoxLayout()
         left = QHBoxLayout()
         tg_btn = QPushButton("Поддержка и обновления")
-        tg_btn.setObjectName("btnCreate")
         tg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         tg_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl("https://t.me/akulov_pro"))
@@ -162,12 +181,13 @@ class TaskListView(QWidget):
 
         btn_create = QPushButton("+ Создать задание")
         btn_create.setObjectName("btnCreate")
+        btn_create.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_create.clicked.connect(self._go_create)
 
         right = QHBoxLayout()
         right.addStretch()
         btn_settings = QPushButton("Настройки")
-        btn_settings.setObjectName("btnCreate")
+        btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_settings.clicked.connect(self._open_settings)
         right.addWidget(btn_settings)
         right.addSpacing(12)
@@ -204,8 +224,8 @@ class TaskListView(QWidget):
         self._date_to = QDateEdit()
         self._date_to.setDisplayFormat("dd.MM.yyyy")
         self._date_to.setCalendarPopup(True)
-        self._date_to.setDate(QDate.currentDate())
-        self._date_to.dateChanged.connect(self._apply_filter)
+        self._date_to.setDate(_today())
+        self._date_to.dateChanged.connect(self._on_date_to_changed)
         _configure_calendar(self._date_to)
         filter_bar.addWidget(QLabel("до"), 0)
         filter_bar.addWidget(self._date_to, 1)
@@ -215,7 +235,7 @@ class TaskListView(QWidget):
         # Table
         self._model = QStandardItemModel(0, 6, self)
         self._model.setHorizontalHeaderLabels(
-            ["СОЗДАНО", "НАЗВАНИЕ", "ДОНОРОВ", "БЭКЛИНКОВ", "СТАТУС", "ДЕЙСТВИЯ"]
+            ["Создано", "Название", "Доноров", "Бэклинков", "Статус", "Действия"]
         )
 
         self._proxy = _TaskFilterProxy(self)
@@ -224,15 +244,28 @@ class TaskListView(QWidget):
         self._table = QTableView()
         self._table.setModel(self._proxy)
         self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        vheader = self._table.verticalHeader()
+        if vheader is not None:
+            vheader.setDefaultSectionSize(40)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.horizontalHeader().setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+        header = self._table.horizontalHeader()
+        if header is not None:
+            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Fixed)
+            header.resizeSection(COL_STATUS, 190)
+            header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._table.horizontalHeader().setSortIndicatorShown(True)
         self._table.setSortingEnabled(True)
         self._table.verticalHeader().setVisible(False)
         self._table.doubleClicked.connect(self._on_row_double_click)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
+        self._actions_font = QFont(self._table.font())
+        self._actions_font.setPixelSize(20)  # theme sizes fonts in px; points are -1
+        self._actions_font.setBold(True)
         self._progress_delegate = _ProgressDelegate(self._table)
         self._table.setItemDelegateForColumn(COL_STATUS, self._progress_delegate)
         self._table.clicked.connect(self._on_cell_clicked)
@@ -250,6 +283,7 @@ class TaskListView(QWidget):
     # ── Data ──────────────────────────────────────────────────────────────
 
     def refresh(self):
+        self._sync_date_to_today()
         self._model.removeRows(0, self._model.rowCount())
         self._task_row_index = {}
         tasks = db.get_all_tasks_with_counts()   # single JOIN query — no N+1
@@ -263,9 +297,7 @@ class TaskListView(QWidget):
             created_iso = task["created_at"]
             created_str = db.format_task_created(created_iso)
 
-            status_label = STATUS_LABELS.get(status, status)
-            if status == "running" and progress > 0:
-                status_label = f"🔄 В процессе ({progress}%)"
+            status_label = _status_text(status, progress)
 
             date_item = QStandardItem(created_str)
             # ISO string stored as sort key so lessThan sorts chronologically
@@ -293,6 +325,8 @@ class TaskListView(QWidget):
             color = QColor(STATUS_COLORS.get(status, "#888888"))
             items[COL_STATUS].setForeground(color)
             items[5].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            items[5].setFont(self._actions_font)
+            items[5].setToolTip("Действия с заданием")
 
             self._model.appendRow(items)
             self._task_row_index[task["id"]] = i
@@ -309,9 +343,7 @@ class TaskListView(QWidget):
             return
         status = task["status"]
         progress = task["progress"]
-        status_label = STATUS_LABELS.get(status, status)
-        if status == "running" and progress > 0:
-            status_label = f"🔄 В процессе ({progress}%)"
+        status_label = _status_text(status, progress)
         self._model.item(row, COL_STATUS).setText(status_label)
         self._model.item(row, COL_STATUS).setForeground(
             QColor(STATUS_COLORS.get(status, "#888888"))
@@ -323,6 +355,15 @@ class TaskListView(QWidget):
         self._model.item(row, COL_BACKLINKS).setData(bl, Qt.ItemDataRole.DisplayRole)
 
     # ── Filtering ─────────────────────────────────────────────────────────
+
+    def _on_date_to_changed(self, date: QDate) -> None:
+        self._date_to_follows_today = date == _today()
+        self._apply_filter()
+
+    def _sync_date_to_today(self) -> None:
+        today = _today()
+        if self._date_to_follows_today and self._date_to.date() != today:
+            self._date_to.setDate(today)
 
     def _apply_filter(self):
         self._proxy.set_filters(

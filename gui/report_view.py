@@ -4,11 +4,20 @@ Screen 3: Task report — summary cards, SE tabs, analytics, donors table, top a
 
 import json
 import logging
+import sqlite3
 from collections import defaultdict
-from html import escape as html_escape
 
-from PyQt6.QtCore import QRectF, Qt, QUrl
+from PyQt6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QRectF,
+    QSortFilterProxyModel,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PyQt6.QtGui import (
+    QBrush,
     QColor,
     QDesktopServices,
     QFont,
@@ -19,6 +28,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -31,6 +41,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
+    QTableView,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -38,7 +49,7 @@ from PyQt6.QtWidgets import (
 )
 
 from db import database as db
-from gui.constants import STATUS_COLORS, STATUS_LABELS
+from gui.constants import STATUS_COLORS, STATUS_DOT, STATUS_LABELS
 from utils.url_utils import get_domain, matches_target, normalize_domain
 
 
@@ -50,23 +61,19 @@ def _clipboard_set(text: str) -> None:
 
 logger = logging.getLogger(__name__)
 
+_SE_LABELS = {
+    "google": "Google",
+    "yandex": "Яндекс",
+    "bing":   "Bing",
+    "baidu":  "Baidu",
+}
+
 _SE_INDEX_COL = {
     "google": "index_google",
     "yandex": "index_yandex",
     "bing":   "index_bing",
     "baidu":  "index_baidu",
 }
-
-
-def donor_url_html(url: str, status_str: str, color: str) -> str:
-    """Rich-text cell for a donor URL; escape so & and quotes stay in the href."""
-    safe_url = html_escape(url or "", quote=True)
-    safe_status = html_escape(str(status_str), quote=True)
-    safe_color = html_escape(color, quote=True)
-    return (
-        f'<b style="color:{safe_color}">{safe_status}</b>  '
-        f'<a href="{safe_url}">{safe_url}</a>'
-    )
 
 
 def matches_google_filter(google_indexed, key: str) -> bool:
@@ -102,6 +109,198 @@ HTTP_COLORS = {
 }
 
 
+COL_D_CODE, COL_D_URL, COL_D_ROBOTS, COL_D_GOOGLE, COL_D_LINKS, COL_D_INT, COL_D_EXT = range(7)
+_DONOR_HEADERS = [
+    "Код", "Ссылка-донор", "Robots", "В Google",
+    "Ссылки на целевой домен", "Вн. ссылок", "Внш. ссылок",
+]
+_SORT_ROLE = Qt.ItemDataRole.UserRole
+
+# key → (label, [(value, text), ...]); the value is kept in self._donor_filter_<key>
+_DONOR_FILTERS: dict[str, tuple[str, list[tuple[str, str]]]] = {
+    "type": ("Rel", [
+        ("all", "Все"), ("dofollow", "Dofollow"), ("nofollow", "Nofollow"),
+        ("ugc", "UGC"), ("sponsored", "Sponsored"),
+    ]),
+    "index": ("Robots", [
+        ("all", "Все"), ("open", "Открыто"), ("closed", "Закрыто"),
+        ("unchecked", "Не проверялось"),
+    ]),
+    "status": ("Статус", [
+        ("all", "Все"), ("found", "Найдено"), ("not_found", "Не найдено"),
+        ("not_loaded", "Не загружено"), ("pending", "В очереди"),
+    ]),
+    "google": ("В Google", [
+        ("all", "Все"), ("indexed", "Да"), ("not_indexed", "Нет"),
+        ("error", "Ошибка"), ("unchecked", "Не проверялось"),
+    ]),
+}
+
+_ROBOTS_CELL = {"open": ("Открыто", "#00c853"), "closed": ("Закрыто", "#ff5252")}
+_GOOGLE_CELL = {
+    "indexed": ("Да", "#00c853"),
+    "not_indexed": ("Нет", "#ff5252"),
+    "error": ("Ошибка", "#ffa726"),
+}
+
+
+def _row_value(row, key: str):
+    """Column value or None — older databases may lack newer columns."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _style_table(table: QTableView) -> None:
+    """Shared compact look for report tables."""
+    table.setAlternatingRowColors(True)
+    table.setShowGrid(False)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setWordWrap(False)
+    vh = table.verticalHeader()
+    if vh is not None:  # QHeaderView is falsy while it has no sections
+        vh.setVisible(False)
+        vh.setDefaultSectionSize(32)
+    hh = table.horizontalHeader()
+    if hh is not None:
+        hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+
+def _capture_view_state(view: QTableView | None) -> tuple | None:
+    """(sort column, sort order, scroll) of a table about to be rebuilt."""
+    if view is None:
+        return None
+    try:
+        header = view.horizontalHeader()
+        bar = view.verticalScrollBar()
+        if header is None or bar is None:
+            return None
+        return header.sortIndicatorSection(), header.sortIndicatorOrder(), bar.value()
+    except RuntimeError:  # widget already deleted
+        return None
+
+
+def _restore_view_state(view: QTableView | None, state: tuple | None) -> None:
+    if view is None or state is None:
+        return
+    section, order, scroll = state
+    if section >= 0:
+        view.sortByColumn(section, order)
+
+    def _scroll() -> None:
+        # Deferred: the scroll range exists only after the new table is laid out.
+        try:
+            bar = view.verticalScrollBar()
+            if bar is not None:
+                bar.setValue(scroll)
+        except RuntimeError:  # replaced by another refresh meanwhile
+            pass
+
+    QTimer.singleShot(0, _scroll)
+
+
+class DonorTableModel(QAbstractTableModel):
+    """Donor rows for the report; filtering happens before set_rows()."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows: list[tuple] = []   # (donor row, its backlinks after the Rel filter)
+        self._se_col = "index_google"
+        self._se_label = "Google"
+
+    def set_rows(self, rows: list[tuple], se_col: str, se_label: str) -> None:
+        self.beginResetModel()
+        self._rows = rows
+        self._se_col = se_col
+        self._se_label = se_label
+        self.endResetModel()
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, COL_D_ROBOTS, COL_D_ROBOTS)
+
+    def donor(self, row: int):
+        return self._rows[row][0] if 0 <= row < len(self._rows) else None
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(_DONOR_HEADERS)
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            if section == COL_D_ROBOTS:
+                return f"Robots ({self._se_label})"
+            return _DONOR_HEADERS[section]
+        return None
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        donor, bls = self._rows[index.row()]
+        col = index.column()
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self._text(donor, bls, col)
+        if role == Qt.ItemDataRole.ForegroundRole:
+            color = self._color(donor, col)
+            return QBrush(color) if color is not None else None
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return self._tooltip(donor, bls, col)
+        if role == _SORT_ROLE:
+            if col == COL_D_CODE:
+                return int(donor["http_status"] or 0)
+            if col in (COL_D_INT, COL_D_EXT):
+                return int(self._text(donor, bls, col))
+            return self._text(donor, bls, col)
+        return None
+
+    def _text(self, donor, bls, col):
+        if col == COL_D_CODE:
+            return str(donor["http_status"] or donor["error_code"] or "—")
+        if col == COL_D_URL:
+            return donor["url"]
+        if col == COL_D_ROBOTS:
+            return _ROBOTS_CELL.get(donor[self._se_col], ("—", ""))[0]
+        if col == COL_D_GOOGLE:
+            return _GOOGLE_CELL.get(_row_value(donor, "google_indexed"), ("—", ""))[0]
+        if col == COL_D_LINKS:
+            if not bls:
+                return "—"
+            first = bls[0]
+            text = f"{first['target_url']}  [{first['rel_type']}]  «{first['anchor_text'] or '—'}»"
+            return f"{text}   +{len(bls) - 1}" if len(bls) > 1 else text
+        if col == COL_D_INT:
+            return str(donor["internal_links"] or 0)
+        if col == COL_D_EXT:
+            return str(donor["external_links"] or 0)
+        return None
+
+    def _color(self, donor, col) -> QColor | None:
+        if col == COL_D_CODE:
+            code = donor["http_status"]
+            return QColor(HTTP_COLORS.get(int(code) // 100, "#888888") if code else "#888888")
+        if col == COL_D_URL:
+            return QApplication.palette().color(QPalette.ColorRole.Link)
+        if col == COL_D_ROBOTS:
+            return QColor(_ROBOTS_CELL.get(donor[self._se_col], ("", "#888888"))[1])
+        if col == COL_D_GOOGLE:
+            value = _row_value(donor, "google_indexed")
+            return QColor(_GOOGLE_CELL.get(value, ("", "#888888"))[1])
+        return None
+
+    def _tooltip(self, donor, bls, col):
+        if col == COL_D_URL:
+            return f"{donor['url']}\nДвойной клик — открыть в браузере"
+        if col == COL_D_GOOGLE:
+            return _row_value(donor, "google_index_error") or None
+        if col == COL_D_LINKS and bls:
+            return "\n".join(
+                f"{b['target_url']}  [{b['rel_type']}]  «{b['anchor_text'] or '—'}»"
+                for b in bls
+            )
+        return None
+
+
 def _secondary(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setObjectName("secondary")
@@ -109,13 +308,14 @@ def _secondary(text: str) -> QLabel:
 
 
 def _badge(text: str, color: str) -> QLabel:
-    hex_color = color
-    if color.startswith("#") and len(color) == 4:
-        hex_color = "#" + "".join(ch * 2 for ch in color[1:])
-    fill = hex_color + "18" if len(hex_color) == 7 else hex_color
+    # Tinted fill via rgba(): Qt reads "#RRGGBBAA" as ARGB, which turned
+    # orange into dark red and made blue fully transparent.
+    c = QColor(color)
+    fill = f"rgba({c.red()}, {c.green()}, {c.blue()}, 36)"
     lbl = QLabel(text)
+    lbl.setTextFormat(Qt.TextFormat.PlainText)
     lbl.setStyleSheet(
-        f"background-color: {fill}; color: {hex_color};"
+        f"background-color: {fill}; color: {c.name()};"
         "border: none; border-radius: 10px;"
         "padding: 2px 10px; font-size: 11px; font-weight: 600;"
     )
@@ -209,10 +409,7 @@ class ReportView(QWidget):
         self._donors_cache: list = []
         self._backlinks_cache: list = []
         self._bl_donor_map_cache: dict = {}
-        self._type_btns: dict[str, QPushButton] = {}
-        self._index_btns: dict[str, QPushButton] = {}
-        self._status_btns: dict[str, QPushButton] = {}
-        self._google_btns: dict[str, QPushButton] = {}
+        self._filter_combos: dict[str, QComboBox] = {}
         self._data_tabs: QTabWidget | None = None
         self._donor_search: QLineEdit | None = None
         self._bl_search: QLineEdit | None = None
@@ -270,6 +467,13 @@ class ReportView(QWidget):
             self._donor_filter_google = "all"
             self._current_se = "google"
         self._task_id = task_id
+        # Auto-refresh during a check must not reset sorting or scroll position.
+        _donor_view_state = (
+            None if switching else _capture_view_state(getattr(self, "_donor_view", None))
+        )
+        _bl_view_state = (
+            None if switching else _capture_view_state(getattr(self, "_bl_table", None))
+        )
         if switching:
             _active_tab = 0
             _donor_search_text = ""
@@ -350,7 +554,8 @@ class ReportView(QWidget):
         back_btn.clicked.connect(self._go_back)
         header_row.addWidget(back_btn)
 
-        title_lbl = QLabel(task["name"].upper())
+        title_lbl = QLabel(task["name"])
+        title_lbl.setTextFormat(Qt.TextFormat.PlainText)
         title_lbl.setObjectName("heading")
         header_row.addWidget(title_lbl)
         header_row.addWidget(_badge("Проверка обратных ссылок", "#007AFF"))
@@ -368,10 +573,10 @@ class ReportView(QWidget):
         # ── Summary cards ─────────────────────────────────────────────────
         cards_row = QHBoxLayout()
         created_str = db.format_task_created(task["created_at"])
-        cards_row.addWidget(_card("ДАТА СОЗДАНИЯ", created_str))
-        cards_row.addWidget(_card("ССЫЛКИ-ДОНОРЫ", str(total_donors)))
+        cards_row.addWidget(_card("Дата создания", created_str))
+        cards_row.addWidget(_card("Ссылки-доноры", str(total_donors)))
         domains_short = ", ".join(domains[:2]) + (f" +{len(domains)-2}" if len(domains) > 2 else "")
-        cards_row.addWidget(_card("ЦЕЛЕВЫЕ ДОМЕНЫ", domains_short))
+        cards_row.addWidget(_card("Целевые домены", domains_short))
 
         # Donor status card with progress bar
         status_card = QFrame()
@@ -380,7 +585,7 @@ class ReportView(QWidget):
         sc_layout = QVBoxLayout(status_card)
         sc_layout.setContentsMargins(16, 14, 16, 14)
         sc_layout.setSpacing(6)
-        sc_layout.addWidget(_secondary("СТАТУС ДОНОРОВ"))
+        sc_layout.addWidget(_secondary("Статус доноров"))
         nums = QLabel(
             f'<span style="color:#00c853"><b>{found}</b></span>'
             f' / <span style="color:#ffa726"><b>{not_found}</b></span>'
@@ -422,7 +627,7 @@ class ReportView(QWidget):
         g_layout = QVBoxLayout(g_card)
         g_layout.setContentsMargins(16, 14, 16, 14)
         g_layout.setSpacing(6)
-        g_layout.addWidget(_secondary("В ИНДЕКСЕ GOOGLE"))
+        g_layout.addWidget(_secondary("В индексе Google"))
         g_nums = QLabel(
             f'<span style="color:#00c853"><b>{g_yes}</b></span>'
             f' / <span style="color:#ff5252"><b>{g_no}</b></span>'
@@ -445,36 +650,6 @@ class ReportView(QWidget):
         cards_row.addWidget(g_card)
 
         self._root.addLayout(cards_row)
-
-        # ── SE Tabs ───────────────────────────────────────────────────────
-        se_row = QHBoxLayout()
-        se_buttons = {
-            "google": ("Google", "#00c853"),
-            "bing":   ("Bing",   "#1976d2"),
-            "yandex": ("Yandex", "#ef5350"),
-            "baidu":  ("Baidu",  "#1565c0"),
-        }
-        self._se_btns: dict[str, QPushButton] = {}
-        for key, (label, color) in se_buttons.items():
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(key == self._current_se)
-            btn.setStyleSheet(
-                f"QPushButton:checked {{ background-color: {color}; color: #fff; border: none; }}"
-            )
-            btn.clicked.connect(lambda _, k=key: self._switch_se(k))
-            self._se_btns[key] = btn
-            se_row.addWidget(btn)
-        se_row.addStretch()
-        self._root.addLayout(se_row)
-
-        hint = QLabel(
-            "Директивы индексации и сканирования (meta robots, X-Robots-Tag) "
-            "могут различаться для каждой поисковой системы"
-        )
-        hint.setObjectName("secondary")
-        hint.setWordWrap(True)
-        self._root.addWidget(hint)
 
         # ── Analytics cards ───────────────────────────────────────────────
         analytics_row = QHBoxLayout()
@@ -499,7 +674,7 @@ class ReportView(QWidget):
             return frame
 
         analytics_row.addWidget(_analytics_block(
-            "DOFOLLOW / NOFOLLOW", df_count, nf_count,
+            "Dofollow / Nofollow", df_count, nf_count,
             "Dofollow", "Nofollow", "#007AFF", "#ff5252"
         ))
 
@@ -519,34 +694,49 @@ class ReportView(QWidget):
         df_domains = len(_df_domain_set)
         nf_domains = len(_all_bl_domains - _df_domain_set)
         analytics_row.addWidget(_analytics_block(
-            "ССЫЛАЮЩИЕСЯ ДОМЕНЫ: DF / NF", df_domains, nf_domains,
+            "Ссылающиеся домены: DF / NF", df_domains, nf_domains,
             "Dofollow", "Nofollow", "#007AFF", "#ff5252"
         ))
         analytics_row.addWidget(_analytics_block(
-            "ТИПЫ АНКОРОВ", text_count, img_count,
+            "Типы анкоров", text_count, img_count,
             "Текст", "Картинка", "#42a5f5", "#ffa726"
         ))
-        # ИНДЕКСИРУЕМОСТЬ — built manually so we can update it when SE tab switches
+        # Indexability (meta robots / X-Robots-Tag) differs per search engine,
+        # so the engine switch lives inside this card — it affects nothing else
+        # except the donors' Robots column and filter.
         idx_frame = QFrame()
         idx_frame.setObjectName("card")
+        idx_frame.setToolTip(
+            "Директивы индексации и сканирования (meta robots, X-Robots-Tag) "
+            "могут различаться для каждой поисковой системы"
+        )
         idx_fl = QVBoxLayout(idx_frame)
         idx_fl.setContentsMargins(16, 14, 16, 14)
         idx_fl.setSpacing(6)
-        idx_fl.addWidget(_secondary("ИНДЕКСИРУЕМОСТЬ"))
-        self._idx_nums_lbl = QLabel(f"{open_count} / {closed_count}")
+        idx_head = QHBoxLayout()
+        idx_head.setSpacing(4)
+        idx_head.addWidget(_secondary("Индексируемость"))
+        idx_head.addStretch()
+        self._se_btns: dict[str, QPushButton] = {}
+        for key, label in _SE_LABELS.items():
+            btn = QPushButton(label)
+            btn.setObjectName("segButton")
+            btn.setCheckable(True)
+            btn.setChecked(key == self._current_se)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, k=key: self._switch_se(k))
+            self._se_btns[key] = btn
+            idx_head.addWidget(btn)
+        idx_fl.addLayout(idx_head)
+        self._idx_nums_lbl = QLabel()
         self._idx_nums_lbl.setStyleSheet("font-size: 20px; font-weight: 700;")
         idx_fl.addWidget(self._idx_nums_lbl)
-        self._idx_bar = _SegBar(
-            [(open_count, "#007AFF"), (closed_count, "#ff5252")],
-            total=total_donors,
-        )
+        self._idx_bar = _SegBar([], total=total_donors)
         idx_fl.addWidget(self._idx_bar)
-        self._idx_legend_lbl = QLabel(
-            '<span style="color:#007AFF">■ Открыто</span>'
-            '  <span style="color:#ff5252">■ Закрыто</span>'
-        )
+        self._idx_legend_lbl = QLabel()
         self._idx_legend_lbl.setObjectName("secondary")
         idx_fl.addWidget(self._idx_legend_lbl)
+        self._set_indexability(open_count, closed_count, total_donors)
         analytics_row.addWidget(idx_frame)
 
         self._root.addLayout(analytics_row)
@@ -574,6 +764,8 @@ class ReportView(QWidget):
             self._donor_search.setText(_donor_search_text)
         if _bl_search_text and self._bl_search is not None:
             self._bl_search.setText(_bl_search_text)
+        _restore_view_state(self._donor_view, _donor_view_state)
+        _restore_view_state(self._bl_table, _bl_view_state)
 
     # ── Domains tab ───────────────────────────────────────────────────────
 
@@ -603,18 +795,14 @@ class ReportView(QWidget):
 
         table = QTableWidget(len(rows_data), 5)
         table.setHorizontalHeaderLabels(
-            ["ЦЕЛЕВОЙ ДОМЕН", "ДОНОРОВ", "БЭКЛИНКОВ", "DOFOLLOW / NOFOLLOW", "СТАТУС"]
+            ["Целевой домен", "Доноров", "Бэклинков", "Dofollow / Nofollow", "Статус"]
         )
         _hh = table.horizontalHeader()
-        if _hh:
+        if _hh is not None:
             _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             _hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
             _hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        _vh = table.verticalHeader()
-        if _vh:
-            _vh.setVisible(False)
-        table.setAlternatingRowColors(True)
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        _style_table(table)
         table.setSortingEnabled(False)
 
         for i, row in enumerate(rows_data):
@@ -638,7 +826,7 @@ class ReportView(QWidget):
                     df_nf_item.setForeground(QColor("#ffa726"))
             table.setItem(i, 3, df_nf_item)
 
-            status_text = "✅ Найден" if row["found"] else "❌ Не найден"
+            status_text = f"{STATUS_DOT} {'Найден' if row['found'] else 'Не найден'}"
             status_item = QTableWidgetItem(status_text)
             status_item.setForeground(QColor("#00c853" if row["found"] else "#ff5252"))
             table.setItem(i, 4, status_item)
@@ -655,95 +843,54 @@ class ReportView(QWidget):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        # Search
+        # Search + one compact drop-down per filter
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
         self._donor_search = QLineEdit()
         self._donor_search.setPlaceholderText("Поиск по донорам...")
         self._donor_search.textChanged.connect(self._refilter)
-        layout.addWidget(self._donor_search)
+        filter_row.addWidget(self._donor_search, 1)
 
-        # Filters row
-        self._type_btns = {}
-        self._index_btns = {}
-        self._status_btns = {}
-        self._google_btns = {}
+        self._filter_combos = {}
+        for key, (label, options) in _DONOR_FILTERS.items():
+            filter_row.addWidget(_secondary(label))
+            combo = QComboBox()
+            for value, text in options:
+                combo.addItem(text, value)
+            combo.setCurrentIndex(max(0, combo.findData(getattr(self, f"_donor_filter_{key}"))))
+            combo.currentIndexChanged.connect(lambda _i, k=key: self._on_filter_changed(k))
+            self._filter_combos[key] = combo
+            filter_row.addWidget(combo)
 
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("ТИП:"))
-        for key, label in [("all","Все"),("dofollow","Dofollow"),("nofollow","Nofollow"),
-                            ("ugc","UGC"),("sponsored","Sponsored")]:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(key == self._donor_filter_type)
-            btn.clicked.connect(lambda _, k=key: self._set_type_filter(k))
-            self._type_btns[key] = btn
-            filter_row.addWidget(btn)
-
-        filter_row.addSpacing(16)
-        filter_row.addWidget(QLabel("ROBOTS:"))
-        for key, label in [("all","Все"),("open","Откр."),("closed","Закр."),
-                            ("unchecked","—")]:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(key == self._donor_filter_index)
-            btn.clicked.connect(lambda _, k=key: self._set_index_filter(k))
-            self._index_btns[key] = btn
-            if key == "unchecked":
-                btn.setToolTip("Не проверялось")
-            filter_row.addWidget(btn)
-
-        filter_row.addSpacing(16)
-        filter_row.addWidget(QLabel("СТАТУС:"))
-        for key, label in [("all","Все"),("found","Найдено"),("not_found","Не найдено"),
-                            ("not_loaded","Не загружено"),("pending","В очереди")]:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(key == self._donor_filter_status)
-            btn.clicked.connect(lambda _, k=key: self._set_status_filter(k))
-            self._status_btns[key] = btn
-            filter_row.addWidget(btn)
-
-        filter_row.addStretch()
+        self._reset_filters_btn = QPushButton("Сбросить")
+        self._reset_filters_btn.setObjectName("btnLink")
+        self._reset_filters_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_filters_btn.clicked.connect(self._reset_donor_filters)
+        filter_row.addWidget(self._reset_filters_btn)
         layout.addLayout(filter_row)
 
-        google_row = QHBoxLayout()
-        google_row.addWidget(QLabel("В GOOGLE:"))
-        for key, label in [("all","Все"),("indexed","Да"),("not_indexed","Нет"),
-                            ("error","Ошибка"),("unchecked","—")]:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(key == self._donor_filter_google)
-            btn.clicked.connect(lambda _, k=key: self._set_google_filter(k))
-            self._google_btns[key] = btn
-            if key == "unchecked":
-                btn.setToolTip("Не проверялось")
-            google_row.addWidget(btn)
-        google_row.addStretch()
-        layout.addLayout(google_row)
-
-        # Table
-        self._donor_table = QTableWidget(0, 6)
-        self._donor_table.setHorizontalHeaderLabels(
-            [
-                "ССЫЛКА-ДОНОР",
-                "ROBOTS",
-                "В GOOGLE",
-                "ССЫЛКИ НА ЦЕЛЕВОЙ ДОМЕН",
-                "ВН. ССЫЛОК",
-                "ВНШ. ССЫЛОК",
-            ]
-        )
-        _hh = self._donor_table.horizontalHeader()
-        if _hh:
-            _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            _hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self._donor_table.setAlternatingRowColors(True)
-        self._donor_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        _vh = self._donor_table.verticalHeader()
-        if _vh:
-            _vh.setVisible(False)
-        self._donor_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._donor_table.customContextMenuRequested.connect(self._show_donor_context_menu)
-        layout.addWidget(self._donor_table)
+        # Model/view table: one widget-free row per donor stays fast at 100k rows.
+        # Model and proxy belong to the view, so each refresh frees the old rows.
+        self._donor_view = QTableView()
+        self._donor_model = DonorTableModel(self._donor_view)
+        self._donor_proxy = QSortFilterProxyModel(self._donor_view)
+        self._donor_proxy.setSourceModel(self._donor_model)
+        self._donor_proxy.setSortRole(_SORT_ROLE)
+        self._donor_view.setModel(self._donor_proxy)
+        _style_table(self._donor_view)
+        _hh = self._donor_view.horizontalHeader()
+        if _hh is not None:
+            _hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            _hh.setSectionResizeMode(COL_D_URL, QHeaderView.ResizeMode.Stretch)
+            _hh.setSectionResizeMode(COL_D_LINKS, QHeaderView.ResizeMode.Stretch)
+            for col in (COL_D_CODE, COL_D_ROBOTS, COL_D_GOOGLE, COL_D_INT, COL_D_EXT):
+                _hh.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+            _hh.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)  # keep DB order
+        self._donor_view.setSortingEnabled(True)
+        self._donor_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._donor_view.customContextMenuRequested.connect(self._show_donor_context_menu)
+        self._donor_view.doubleClicked.connect(self._on_donor_double_click)
+        layout.addWidget(self._donor_view)
 
         self._donors_cache = donors
         self._backlinks_cache = backlinks
@@ -758,136 +905,53 @@ class ReportView(QWidget):
 
         search = getattr(self, "_donor_search", None)
         search_text = search.text().lower() if search else ""
+        se_col = _SE_INDEX_COL.get(self._current_se, "index_google")
 
-        self._donor_table.setRowCount(0)
+        rows: list[tuple] = []
         for donor in donors:
-            # Apply filters
             if search_text and search_text not in donor["url"].lower():
                 continue
-            if self._donor_filter_index != "all":
-                _se_col_filter = _SE_INDEX_COL.get(self._current_se, "index_google")
-                if not matches_robots_filter(donor[_se_col_filter], self._donor_filter_index):
-                    continue
+            if not matches_robots_filter(donor[se_col], self._donor_filter_index):
+                continue
             if (
                 self._donor_filter_status != "all"
                 and donor["status"] != self._donor_filter_status
             ):
                 continue
-            try:
-                g_raw = donor["google_indexed"]
-            except (KeyError, IndexError):
-                g_raw = None
-            if not matches_google_filter(g_raw, self._donor_filter_google):
+            if not matches_google_filter(_row_value(donor, "google_indexed"),
+                                         self._donor_filter_google):
                 continue
-
             donor_bls = bl_by_donor.get(donor["id"], [])
-
             if self._donor_filter_type != "all":
                 donor_bls = [b for b in donor_bls if b["rel_type"] == self._donor_filter_type]
                 if not donor_bls:
                     continue
+            rows.append((donor, donor_bls))
 
-            row = self._donor_table.rowCount()
-            self._donor_table.insertRow(row)
-
-            # Column 0: URL + status
-            status_code = donor["http_status"]
-            color = HTTP_COLORS.get(int(status_code) // 100, "#888") if status_code else "#888"
-            status_str = str(status_code) if status_code else donor["error_code"] or "—"
-            url_cell = QLabel(donor_url_html(donor["url"], status_str, color))
-            url_cell.setOpenExternalLinks(True)
-            url_cell.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-            url_cell.setWordWrap(True)
-            self._donor_table.setCellWidget(row, 0, url_cell)
-
-            # Column 1: indexability — use active SE tab
-            _se_col = _SE_INDEX_COL.get(self._current_se, "index_google")
-            idx_val = donor[_se_col]  # None = not yet checked
-            if idx_val == "open":
-                idx_color = "#00c853"
-                idx_text = "Открыто"
-            elif idx_val == "closed":
-                idx_color = "#ff5252"
-                idx_text = "Закрыто"
-            else:
-                idx_color = "#888888"
-                idx_text = "—"
-            idx_item = QTableWidgetItem(idx_text)
-            idx_item.setForeground(QColor(idx_color))
-            self._donor_table.setItem(row, 1, idx_item)
-
-            g_val = g_raw
-            if g_val == "indexed":
-                g_text, g_color = "Да", "#00c853"
-            elif g_val == "not_indexed":
-                g_text, g_color = "Нет", "#ff5252"
-            elif g_val == "error":
-                g_text, g_color = "Ошибка", "#ffa726"
-            else:
-                g_text, g_color = "—", "#888888"
-            g_item = QTableWidgetItem(g_text)
-            g_item.setForeground(QColor(g_color))
-            try:
-                err = donor["google_index_error"]
-                if err:
-                    g_item.setToolTip(str(err))
-            except (KeyError, IndexError):
-                pass
-            self._donor_table.setItem(row, 2, g_item)
-
-            # Column 3: backlinks found
-            if donor_bls:
-                bls_text = "\n".join(
-                    f"{bl['target_url']}  [{bl['rel_type']}]  «{bl['anchor_text'] or '—'}»"
-                    for bl in donor_bls
-                )
-            else:
-                bls_text = "—"
-            bl_item = QTableWidgetItem(bls_text)
-            bl_item.setToolTip(bls_text)
-            self._donor_table.setItem(row, 3, bl_item)
-
-            # Column 4-5: link counts (donor URL / HTML snippet in UserRole for context menu)
-            int_item = QTableWidgetItem(str(donor["internal_links"] or 0))
-            int_item.setData(Qt.ItemDataRole.UserRole, donor["url"])
-            try:
-                snippet = donor["html_snippet"] or ""
-            except (KeyError, IndexError):
-                snippet = ""
-            int_item.setData(Qt.ItemDataRole.UserRole + 1, snippet)
-            self._donor_table.setItem(row, 4, int_item)
-            self._donor_table.setItem(
-                row, 5, QTableWidgetItem(str(donor["external_links"] or 0))
-            )
-
-            self._donor_table.setRowHeight(row, max(60, 24 * max(len(donor_bls), 1)))
+        self._donor_model.set_rows(rows, se_col, _SE_LABELS.get(self._current_se, "Google"))
+        self._update_reset_button()
 
     def _refilter(self):
         self._populate_donor_table(self._donors_cache, self._backlinks_cache)
 
-    def _set_type_filter(self, key):
-        self._donor_filter_type = key
-        for k, btn in self._type_btns.items():
-            btn.setChecked(k == key)
+    def _on_filter_changed(self, key: str) -> None:
+        combo = self._filter_combos[key]
+        setattr(self, f"_donor_filter_{key}", combo.currentData() or "all")
         self._refilter()
 
-    def _set_index_filter(self, key):
-        self._donor_filter_index = key
-        for k, btn in self._index_btns.items():
-            btn.setChecked(k == key)
+    def _reset_donor_filters(self) -> None:
+        for key, combo in self._filter_combos.items():
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+            setattr(self, f"_donor_filter_{key}", "all")
         self._refilter()
 
-    def _set_status_filter(self, key):
-        self._donor_filter_status = key
-        for k, btn in self._status_btns.items():
-            btn.setChecked(k == key)
-        self._refilter()
-
-    def _set_google_filter(self, key):
-        self._donor_filter_google = key
-        for k, btn in self._google_btns.items():
-            btn.setChecked(k == key)
-        self._refilter()
+    def _update_reset_button(self) -> None:
+        active = any(
+            getattr(self, f"_donor_filter_{key}") != "all" for key in _DONOR_FILTERS
+        )
+        self._reset_filters_btn.setVisible(active)
 
     # ── Backlinks tab ─────────────────────────────────────────────────────
 
@@ -904,18 +968,14 @@ class ReportView(QWidget):
 
         self._bl_table = QTableWidget(0, 5)
         self._bl_table.setHorizontalHeaderLabels(
-            ["URL ДОНОРА", "URL ЦЕЛИ", "АНКОР", "ТИП", "REL"]
+            ["URL донора", "URL цели", "Анкор", "Тип", "Rel"]
         )
         _hh = self._bl_table.horizontalHeader()
-        if _hh:
+        if _hh is not None:
             _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             _hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             _hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        _vh = self._bl_table.verticalHeader()
-        if _vh:
-            _vh.setVisible(False)
-        self._bl_table.setAlternatingRowColors(True)
-        self._bl_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        _style_table(self._bl_table)
         self._bl_table.setSortingEnabled(True)
         self._bl_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._bl_table.customContextMenuRequested.connect(self._show_bl_context_menu)
@@ -995,17 +1055,13 @@ class ReportView(QWidget):
 
         table = QTableWidget(len(anchor_stats), 5)
         table.setHorizontalHeaderLabels(
-            ["АНКОР", "ССЫЛКИ", "ДОМЕНЫ", "DOFOLLOW / NOFOLLOW", "%"]
+            ["Анкор", "Ссылки", "Домены", "Dofollow / Nofollow", "%"]
         )
         _hh = table.horizontalHeader()
-        if _hh:
+        if _hh is not None:
             _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             _hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        _vh = table.verticalHeader()
-        if _vh:
-            _vh.setVisible(False)
-        table.setAlternatingRowColors(True)
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        _style_table(table)
 
         table.setSortingEnabled(False)   # must be off while inserting rows
         for i, row in enumerate(anchor_stats):
@@ -1121,26 +1177,31 @@ class ReportView(QWidget):
 
     # ── Donors context menu ───────────────────────────────────────────────
 
+    def _donor_at(self, proxy_index) -> "sqlite3.Row | None":
+        if not proxy_index.isValid():
+            return None
+        return self._donor_model.donor(self._donor_proxy.mapToSource(proxy_index).row())
+
+    def _on_donor_double_click(self, proxy_index) -> None:
+        donor = self._donor_at(proxy_index)
+        if donor is not None and proxy_index.column() == COL_D_URL:
+            QDesktopServices.openUrl(QUrl(donor["url"]))
+
     def _show_donor_context_menu(self, pos) -> None:
-        row = self._donor_table.rowAt(pos.y())
-        if row < 0:
+        donor = self._donor_at(self._donor_view.indexAt(pos))
+        if donor is None:
             return
-        item = self._donor_table.item(row, 4)
-        url = item.data(Qt.ItemDataRole.UserRole) if item else ""
-        snippet = item.data(Qt.ItemDataRole.UserRole + 1) if item else ""
-        if not url:
-            return
+        url = donor["url"]
+        snippet = _row_value(donor, "html_snippet") or ""
         menu = QMenu(self)
-        menu.addAction(
-            "Копировать URL донора",
-            lambda: _clipboard_set(url),
-        )
+        menu.addAction("Открыть в браузере", lambda: QDesktopServices.openUrl(QUrl(url)))
+        menu.addAction("Копировать URL донора", lambda: _clipboard_set(url))
         if snippet:
             menu.addAction(
                 "Просмотр HTML страницы",
                 lambda s=snippet: self._show_context_dialog(s, "HTML страницы донора"),
             )
-        vp = self._donor_table.viewport()
+        vp = self._donor_view.viewport()
         if vp:
             menu.exec(vp.mapToGlobal(pos))
 
@@ -1150,21 +1211,27 @@ class ReportView(QWidget):
         self._current_se = key
         for k, btn in self._se_btns.items():
             btn.setChecked(k == key)
-        if hasattr(self, "_donor_table"):
+        if hasattr(self, "_donor_model"):
             self._refilter()
         self._update_indexability_card()
 
     def _update_indexability_card(self) -> None:
-        """Refresh the ИНДЕКСИРУЕМОСТЬ card to match the active SE tab."""
+        """Refresh the indexability card to match the selected search engine."""
         if not hasattr(self, "_idx_nums_lbl") or not self._donors_cache:
             return
         col = _SE_INDEX_COL.get(self._current_se, "index_google")
         open_count   = sum(1 for d in self._donors_cache if d[col] == "open")
         closed_count = sum(1 for d in self._donors_cache if d[col] == "closed")
+        self._set_indexability(open_count, closed_count, len(self._donors_cache))
+
+    def _set_indexability(self, open_count: int, closed_count: int, total: int) -> None:
         self._idx_nums_lbl.setText(f"{open_count} / {closed_count}")
         self._idx_bar.set_segments(
-            [(open_count, "#007AFF"), (closed_count, "#ff5252")],
-            total=len(self._donors_cache),
+            [(open_count, "#007AFF"), (closed_count, "#ff5252")], total=total
+        )
+        self._idx_legend_lbl.setText(
+            f'<span style="color:#007AFF">■ Открыто: {open_count}</span>'
+            f'  <span style="color:#ff5252">■ Закрыто: {closed_count}</span>'
         )
 
     # ── Actions ───────────────────────────────────────────────────────────

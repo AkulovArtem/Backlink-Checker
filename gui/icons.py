@@ -1,48 +1,6 @@
-from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
+from PyQt6.QtCore import QEvent, QPointF
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import QSizePolicy, QWidget
-
-
-class LinkIcon(QWidget):
-    """
-    Two interlocked ovals — chain / link glyph drawn with QPainter.
-    Height is fixed; width is ~1.72 × height so the rings look square.
-    Colour is taken from the widget palette (tracks light/dark theme automatically).
-    """
-
-    def __init__(self, size: int = 22, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(int(size * 1.72), size)
-
-    def changeEvent(self, event) -> None:
-        if event.type() == QEvent.Type.PaletteChange:
-            self.update()
-        super().changeEvent(event)
-
-    def paintEvent(self, event) -> None:
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        W, H = float(self.width()), float(self.height())
-
-        pen = QPen(self.palette().text().color())
-        pen.setWidthF(H * 0.13)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-
-        rw = W * 0.55       # ring width  — rings overlap by ~10 % of W
-        rh = H * 0.72       # ring height
-        ry = (H - rh) / 2   # vertical centre
-        radius = rh / 2
-
-        # left ring
-        p.drawRoundedRect(QRectF(0, ry, rw, rh), radius, radius)
-        # right ring
-        p.drawRoundedRect(QRectF(W - rw, ry, rw, rh), radius, radius)
-
-        p.end()
 
 
 class OrDivider(QWidget):

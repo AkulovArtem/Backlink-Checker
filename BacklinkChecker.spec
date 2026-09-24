@@ -9,6 +9,7 @@ Build:
     pyinstaller BacklinkChecker.spec --clean --noconfirm
 """
 
+import json
 import os
 import playwright
 from pathlib import Path
@@ -29,13 +30,28 @@ if not _pw_node.exists():
 _local_app = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
 _pw_browsers = _local_app / "ms-playwright"
 
-_shell_dirs = sorted(_pw_browsers.glob("chromium_headless_shell-*"))
-if not _shell_dirs:
+# Bundle exactly the revision this playwright version expects — the newest
+# folder in the cache may belong to another install (and "999" > "1243" as text).
+_expected_rev = None
+_browsers_json = _pw_package / "browsers.json"
+if _browsers_json.exists():
+    _data = json.loads(_browsers_json.read_text())
+    for _browser in _data.get("browsers", []):
+        if _browser.get("name") == "chromium-headless-shell":
+            _expected_rev = str(_browser.get("revision"))
+            break
+
+if _expected_rev:
+    _shell_dir = _pw_browsers / f"chromium_headless_shell-{_expected_rev}"
+else:
+    _shell_dirs = sorted(_pw_browsers.glob("chromium_headless_shell-*"))
+    _shell_dir = _shell_dirs[-1] if _shell_dirs else Path()
+
+if not _shell_dir.is_dir():
     raise SystemExit(
         "\n[ERROR] chromium_headless_shell not found.\n"
         "Run first:  playwright install chromium\n"
     )
-_shell_dir = _shell_dirs[-1]
 
 print(f"[spec] playwright    : {_pw_dir}")
 print(f"[spec] node.exe      : {_pw_node.stat().st_size // 1024 // 1024} MB")

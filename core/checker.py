@@ -219,8 +219,20 @@ async def run_check(
             for donor_id, url in config.donor_urls
         ]
 
+        async def cancel_on_stop() -> None:
+            # Abort pages in flight instead of waiting out their timeout;
+            # cancelled donors stay pending for "Continue".
+            await stop_event.wait()
+            for t in tasks:
+                t.cancel()
+
+        stop_watcher = asyncio.create_task(cancel_on_stop())
+
         try:
-            await asyncio.gather(*tasks)
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, Exception):
+                    raise outcome
         except asyncio.CancelledError:
             for t in tasks:
                 t.cancel()
@@ -228,6 +240,7 @@ async def run_check(
             # otherwise pages in flight get a PWError mid-navigation.
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
+            stop_watcher.cancel()
             try:
                 await browser.close()
             except Exception:

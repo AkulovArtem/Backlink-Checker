@@ -83,7 +83,10 @@ a = Analysis(
         ("icon.ico", "."),
         ("icon.icns", "."),
         (str(_pw_package), "playwright/driver/package"),
-        (str(_shell_dir), _shell_dir.name),
+        # The headless shell is NOT collected here: PyInstaller rewrites every
+        # dylib's install name, and Chromium 1243's libEGL.dylib has no header
+        # room for that. build_macos.sh copies the folder into the .app as-is
+        # (Contents/Frameworks = sys._MEIPASS = PLAYWRIGHT_BROWSERS_PATH).
         *_pw_datas,
     ],
     hiddenimports=_pw_hiddenimports,

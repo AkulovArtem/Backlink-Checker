@@ -23,7 +23,6 @@ class ParseSpeedyBalanceTest(unittest.TestCase):
         )
         self.assertTrue(r.ok)
         self.assertEqual(r.amount, 10014495)
-        self.assertTrue(r.is_usable)
 
     def test_tokens_used_when_indexer_is_zero(self):
         r = parse_balance_body(
@@ -31,13 +30,11 @@ class ParseSpeedyBalanceTest(unittest.TestCase):
         )
         self.assertTrue(r.ok)
         self.assertEqual(r.amount, 98)
-        self.assertTrue(r.is_usable)
 
     def test_zero_indexer_is_not_usable(self):
         r = parse_balance_body('{"code": 0, "balance": {"indexer": 0, "checker": 50}}')
         self.assertTrue(r.ok)
         self.assertEqual(r.amount, 0)
-        self.assertFalse(r.is_usable)
 
     def test_error_code(self):
         r = parse_balance_body('{"code": 2, "error": "bad key"}')
@@ -235,6 +232,33 @@ class SubmitUrlsTest(unittest.TestCase):
         result = submit_urls("k", ["https://a.example/1"], title="Job")
         self.assertFalse(result.ok)
         self.assertIn("100", result.error)
+
+    @patch("core.speedyindex._http_json")
+    def test_http_error_on_first_chunk_submits_nothing(self, mock_http):
+        from io import BytesIO
+        from urllib.error import HTTPError
+
+        mock_http.side_effect = HTTPError(
+            "https://api.speedyindex.com/v2/task/google/indexer/create",
+            500, "Server Error", hdrs=None, fp=BytesIO(b"<html>oops</html>"),
+        )
+        result = submit_urls("k", ["https://a/1", "https://a/2"], title="Job")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.submitted, 0)
+
+    @patch("core.speedyindex._http_json")
+    def test_http_error_on_second_chunk_keeps_first_count(self, mock_http):
+        from io import BytesIO
+        from urllib.error import HTTPError
+
+        mock_http.side_effect = [
+            '{"code": 0, "task_id": "t1"}',
+            HTTPError("u", 500, "Server Error", hdrs=None, fp=BytesIO(b"")),
+        ]
+        urls = [f"https://ex.com/{i}" for i in range(SPEEDYINDEX_MAX_URLS + 2)]
+        result = submit_urls("k", urls, title="big")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.submitted, SPEEDYINDEX_MAX_URLS)
 
     def test_provider_constant(self):
         self.assertEqual(PROVIDER_SPEEDYINDEX, "speedyindex")

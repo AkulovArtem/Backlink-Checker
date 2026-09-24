@@ -2,6 +2,7 @@
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -121,7 +122,15 @@ class SettingsDialog(QDialog):
         self._speedy_bal.setWordWrap(True)
         root.addWidget(self._speedy_bal)
 
+        # Personal URLs carry key=… too, so every field is masked by default
+        # (screen sharing, screenshots); the checkbox reveals them.
+        self._show_keys = QCheckBox("Показать ключи и URL")
+        self._show_keys.toggled.connect(self._set_keys_visible)
+        root.addWidget(self._show_keys)
+        self._set_keys_visible(False)
+
         self._wipe_btn = QPushButton("Очистить базу")
+        self._wipe_btn.setObjectName("btnDanger")
         self._wipe_btn.clicked.connect(self._wipe)
         self._cancel_btn = QPushButton("Отмена")
         self._cancel_btn.clicked.connect(self.reject)
@@ -135,6 +144,13 @@ class SettingsDialog(QDialog):
         row.addWidget(self._save_btn)
         self._button_row = row
         root.addLayout(row)
+
+    def _set_keys_visible(self, visible: bool) -> None:
+        mode = QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        for edit in (
+            self._river_edit, self._stock_edit, self._jsonseo_edit, self._speedy_edit
+        ):
+            edit.setEchoMode(mode)
 
     def _label_for(self, provider: str) -> QLabel:
         return {
